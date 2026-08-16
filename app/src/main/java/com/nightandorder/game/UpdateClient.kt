@@ -88,7 +88,7 @@ class UpdateClient(private val context: Context) {
                 progress = 1f
                 phase = UpdatePhase.READY
             } catch (e: Exception) {
-                error = e.message ?: "не скачалось"
+                error = e.message ?: "Не удалось скачать"
                 phase = UpdatePhase.FAILED
             }
         }, "update-dl").start()

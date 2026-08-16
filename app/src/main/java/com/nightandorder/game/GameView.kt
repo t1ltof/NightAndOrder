@@ -7,43 +7,49 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.LinearGradient
 import android.graphics.Paint
-import android.graphics.PixelFormat
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
 import android.os.SystemClock
+import android.view.Choreographer
 import android.view.KeyEvent
 import android.view.MotionEvent
-import android.view.SurfaceHolder
-import android.view.SurfaceView
+import android.content.Intent
+import android.net.Uri
+import android.view.View
 import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.min
 import kotlin.math.sin
 
-enum class Screen { TITLE, SELECT, PLAY, LEVELUP, PAUSE, END }
+enum class Screen { TITLE, SELECT, PLAY, LEVELUP, PAUSE, END, SETTINGS, CHEST }
 
 class GameView(
     context: Context,
     private val brightness: BrightnessMonitor,
     private val updates: UpdateClient,
-) : SurfaceView(context), SurfaceHolder.Callback, Runnable {
+    private val prefs: Prefs,
+    private val sfx: Sfx,
+) : View(context), Choreographer.FrameCallback {
 
     private val assets = Assets(context)
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val spritePaint = Paint().apply { isFilterBitmap = true }
+    private val spritePaint = Paint().apply { isFilterBitmap = false }
     private val text = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        typeface = Typeface.create(Typeface.SERIF, Typeface.BOLD)
+        typeface = Typeface.create(Typeface.SERIF, Typeface.NORMAL)
         color = Color.WHITE
+        isSubpixelText = false
+        isLinearText = true
     }
     private val tmp = RectF()
+    private val choreographer = Choreographer.getInstance()
 
     @Volatile private var running = false
-    @Volatile private var thread: Thread? = null
     @Volatile var screen = Screen.TITLE
+    private var settingsBack = Screen.TITLE
+    private var sliderHeld = false
     private var world: World? = null
     private var selected: CharacterDef = Catalog.characters[0]
-    private var hover: CharacterDef? = Catalog.characters[0]
 
     private var stickId = -1
     private var stickCx = 0f
@@ -58,6 +64,7 @@ class GameView(
     private val pendingHits = ArrayList<Hit>(16)
     @Volatile private var liveHits: List<Hit> = emptyList()
     private var lastNs = 0L
+    private var acc = 0f
     private var titlePulse = 0f
     private var lastBrightNs = 0L
     private var cachedBg: Bitmap? = null
@@ -68,11 +75,11 @@ class GameView(
     private val holies = Catalog.characters.filter { it.faction == Faction.HOLY }
 
     init {
-        holder.addCallback(this)
-        holder.setFormat(PixelFormat.OPAQUE)
+        setLayerType(LAYER_TYPE_HARDWARE, null)
         isFocusable = true
         isFocusableInTouchMode = true
         keepScreenOn = true
+        isClickable = true
     }
 
     private fun resetPaint() {
@@ -84,7 +91,7 @@ class GameView(
     }
 
     fun onResumeGame() {
-        if (holder.surface.isValid) startLoop()
+        startLoop()
     }
 
     fun onPauseGame() {
@@ -98,7 +105,11 @@ class GameView(
                 screen = Screen.PAUSE
                 true
             }
-            Screen.PAUSE, Screen.LEVELUP -> true
+            Screen.SETTINGS -> {
+                screen = settingsBack
+                true
+            }
+            Screen.PAUSE, Screen.LEVELUP, Screen.CHEST -> true
             Screen.SELECT, Screen.END -> {
                 screen = Screen.TITLE
                 true
@@ -107,57 +118,57 @@ class GameView(
         }
     }
 
-    override fun surfaceCreated(holder: SurfaceHolder) {
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
         startLoop()
     }
 
-    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) = Unit
-
-    override fun surfaceDestroyed(holder: SurfaceHolder) {
+    override fun onDetachedFromWindow() {
         stopLoop()
+        super.onDetachedFromWindow()
     }
 
     private fun startLoop() {
         if (running) return
         running = true
         lastNs = SystemClock.elapsedRealtimeNanos()
-        thread = Thread(this, "night-loop").also { it.start() }
+        acc = 0f
+        choreographer.postFrameCallback(this)
     }
 
     private fun stopLoop() {
         running = false
-        thread?.join(400)
-        thread = null
+        choreographer.removeFrameCallback(this)
     }
 
-    override fun run() {
-        while (running) {
-            val frameStart = SystemClock.elapsedRealtimeNanos()
-            var dt = (frameStart - lastNs) / 1_000_000_000f
-            lastNs = frameStart
-            if (dt > 0.05f) dt = 0.05f
-            if (screen == Screen.PLAY && frameStart - lastBrightNs > 500_000_000L) {
-                brightness.refresh()
-                lastBrightNs = frameStart
-            }
-            tick(dt)
-            val canvas = holder.lockCanvas()
-            if (canvas != null) {
-                try {
-                    drawAll(canvas)
-                } finally {
-                    holder.unlockCanvasAndPost(canvas)
-                }
-            }
-            val tookMs = (SystemClock.elapsedRealtimeNanos() - frameStart) / 1_000_000L
-            val sleep = 16L - tookMs
-            if (sleep > 1L) {
-                try {
-                    Thread.sleep(sleep)
-                } catch (_: InterruptedException) {
-                }
-            }
+    override fun doFrame(frameTimeNanos: Long) {
+        if (!running) return
+        if (lastNs == 0L) lastNs = frameTimeNanos
+        var dt = (frameTimeNanos - lastNs) / 1_000_000_000f
+        lastNs = frameTimeNanos
+        if (dt > 0.25f) dt = 0.25f
+        acc += dt
+        var steps = 0
+        while (acc >= STEP && steps < 5) {
+            tick(STEP)
+            acc -= STEP
+            steps++
         }
+        if (acc > STEP * 5f) acc = 0f
+        if (screen == Screen.PLAY && frameTimeNanos - lastBrightNs > 500_000_000L) {
+            brightness.refresh()
+            lastBrightNs = frameTimeNanos
+        }
+        invalidate()
+        choreographer.postFrameCallback(this)
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        drawAll(canvas)
+    }
+
+    companion object {
+        private const val STEP = 1f / 60f
     }
 
     private fun tick(dt: Float) {
@@ -174,11 +185,26 @@ class GameView(
             w.inputX = ix
             w.inputY = iy
             w.tick(dt)
+            drainCues(w)
             when {
+                w.pendingChest != null -> screen = Screen.CHEST
                 w.pendingOffers != null -> screen = Screen.LEVELUP
                 w.end != null -> screen = Screen.END
             }
         }
+    }
+
+    private fun drainCues(w: World) {
+        for (e in w.events) {
+            sfx.play(e)
+            when (e) {
+                Cue.HURT -> sfx.vibe(40, 160)
+                Cue.LEVEL, Cue.CHEST -> sfx.vibe(30, 90)
+                Cue.BOSS, Cue.DAWN -> sfx.vibe(80, 200)
+                else -> Unit
+            }
+        }
+        w.events.clear()
     }
 
     private fun startRun(def: CharacterDef) {
@@ -200,7 +226,10 @@ class GameView(
                 val x = event.getX(i)
                 val y = event.getY(i)
                 val id = event.getPointerId(i)
-                if (screen == Screen.PLAY && x < w * 0.62f && y > h * 0.45f) {
+                if (screen == Screen.SETTINGS && y in h * 0.23f..h * 0.32f) {
+                    sliderHeld = true
+                    setVolumeFrom(x)
+                } else if (screen == Screen.PLAY && x < w * 0.62f && y > h * 0.45f) {
                     stickId = id
                     stickCx = x
                     stickCy = y
@@ -211,7 +240,9 @@ class GameView(
                 }
             }
             MotionEvent.ACTION_MOVE -> {
-                if (stickId != -1) {
+                if (sliderHeld) {
+                    setVolumeFrom(event.getX(0))
+                } else if (stickId != -1) {
                     val idx = event.findPointerIndex(stickId)
                     if (idx >= 0) {
                         val dx = event.getX(idx) - stickCx
@@ -231,6 +262,7 @@ class GameView(
                     stickX = 0f
                     stickY = 0f
                 }
+                sliderHeld = false
             }
         }
         return true
@@ -263,6 +295,12 @@ class GameView(
         return true
     }
 
+    private fun setVolumeFrom(x: Float) {
+        val w = width.toFloat()
+        prefs.volume = ((x - w * 0.1f) / (w * 0.8f)).coerceIn(0f, 1f)
+        sfx.rebuild()
+    }
+
     private fun onTap(x: Float, y: Float) {
         val hits = liveHits
         for (i in hits.indices.reversed()) {
@@ -280,10 +318,18 @@ class GameView(
         when (screen) {
             Screen.TITLE -> drawTitle(c)
             Screen.SELECT -> drawSelect(c)
+            Screen.SETTINGS -> {
+                drawBackdrop(c, true)
+                drawSettings(c)
+            }
             Screen.PLAY -> drawPlay(c)
             Screen.LEVELUP -> {
                 drawPlay(c)
                 drawLevelUp(c)
+            }
+            Screen.CHEST -> {
+                drawPlay(c)
+                drawChest(c)
             }
             Screen.PAUSE -> {
                 drawPlay(c)
@@ -301,29 +347,25 @@ class GameView(
         val w = c.width
         val h = c.height
         val cache = cachedBg
-        if (cache == null || cachedBgW != w || cachedBgH != h || cachedBgVampire != vampireTint) {
+        if (cache == null || cachedBgW != w || cachedBgH != h) {
             cache?.recycle()
             val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.RGB_565)
             val cc = Canvas(bmp)
-            val top = if (vampireTint) 0xFF140810.toInt() else 0xFF101018.toInt()
-            val bot = if (vampireTint) 0xFF2A1018.toInt() else 0xFF1A1830.toInt()
-            paint.shader = LinearGradient(0f, 0f, 0f, h.toFloat(), top, bot, Shader.TileMode.CLAMP)
-            cc.drawRect(0f, 0f, w.toFloat(), h.toFloat(), paint)
-            paint.shader = null
-            val tile = assets.tile
-            if (tile != null) {
-                paint.alpha = 70
-                var y = 0f
-                while (y < h) {
-                    var x = 0f
-                    while (x < w) {
-                        cc.drawBitmap(tile, x, y, paint)
-                        x += tile.width
-                    }
-                    y += tile.height
-                }
-                paint.alpha = 255
+            val art = assets.menuBg
+            if (art != null) {
+                val aw = art.width.toFloat()
+                val ah = art.height.toFloat()
+                val scale = maxOf(w / aw, h / ah)
+                val dw = aw * scale
+                val dh = ah * scale
+                val dx = (w - dw) / 2f
+                val dy = (h - dh) / 2f
+                cc.drawBitmap(art, null, android.graphics.RectF(dx, dy, dx + dw, dy + dh), spritePaint)
+            } else {
+                cc.drawColor(0xFF140810.toInt())
             }
+            paint.color = 0x66080A10.toInt()
+            cc.drawRect(0f, 0f, w.toFloat(), h.toFloat(), paint)
             cachedBg = bmp
             cachedBgW = w
             cachedBgH = h
@@ -350,10 +392,14 @@ class GameView(
         c.drawText("ОРДЕН", w / 2f, h * 0.46f, text)
         text.textSize = w * 0.038f
         text.color = 0x88E8D5A3.toInt()
-        c.drawText("две крови · одно поле", w / 2f, h * 0.52f, text)
+        c.drawText("вампиры и Святой орден", w / 2f, h * 0.52f, text)
         text.textSize = w * 0.028f
         text.color = 0x66E8D5A3.toInt()
         c.drawText(BuildConfig.VERSION_NAME, w / 2f, h * 0.57f, text)
+        drawButton(c, w * 0.72f, h * 0.03f, w * 0.24f, h * 0.055f, "Настройки", 0xAA201018.toInt()) {
+            settingsBack = Screen.TITLE
+            screen = Screen.SETTINGS
+        }
 
         val showUpdate = updates.phase == UpdatePhase.AVAILABLE ||
             updates.phase == UpdatePhase.DOWNLOADING ||
@@ -369,9 +415,9 @@ class GameView(
             text.alpha = (pulse * 255).toInt()
             text.textSize = w * 0.042f
             text.color = Color.WHITE
-            c.drawText("коснись, чтобы войти", w / 2f, h * 0.78f, text)
+            c.drawText("нажмите, чтобы начать", w / 2f, h * 0.78f, text)
             text.alpha = 255
-            pendingHits += Hit(0f, 0f, w, h) { screen = Screen.SELECT }
+            pendingHits += Hit(0f, h * 0.12f, w, h) { screen = Screen.SELECT }
         }
     }
 
@@ -391,10 +437,10 @@ class GameView(
         val rel = updates.remote
         when (updates.phase) {
             UpdatePhase.AVAILABLE -> {
-                c.drawText("Новая кровь  ${rel?.versionName ?: ""}", w / 2f, top + h * 0.045f, text)
+                c.drawText("Новая версия  ${rel?.versionName ?: ""}", w / 2f, top + h * 0.045f, text)
                 text.textSize = w * 0.028f
                 text.color = 0xCCE8D5A3.toInt()
-                c.drawText("на устройстве  ${BuildConfig.VERSION_NAME}", w / 2f, top + h * 0.08f, text)
+                c.drawText("сейчас стоит  ${BuildConfig.VERSION_NAME}", w / 2f, top + h * 0.08f, text)
                 drawButton(c, w * 0.12f, top + h * 0.11f, w * 0.44f, h * 0.055f, "Обновить", 0xFF6A1824.toInt()) {
                     updates.download()
                 }
@@ -403,7 +449,7 @@ class GameView(
                 }
             }
             UpdatePhase.DOWNLOADING -> {
-                c.drawText("Качаю ${rel?.versionName ?: ""}", w / 2f, top + h * 0.05f, text)
+                c.drawText("Загрузка ${rel?.versionName ?: ""}", w / 2f, top + h * 0.05f, text)
                 paint.color = 0xFF2A1014.toInt()
                 tmp.set(w * 0.14f, top + h * 0.09f, w * 0.86f, top + h * 0.115f)
                 c.drawRoundRect(tmp, 8f, 8f, paint)
@@ -421,7 +467,7 @@ class GameView(
                 }
             }
             UpdatePhase.FAILED -> {
-                c.drawText("Не вышло скачать", w / 2f, top + h * 0.045f, text)
+                c.drawText("Не удалось скачать", w / 2f, top + h * 0.045f, text)
                 text.textSize = w * 0.026f
                 text.color = 0xAAD4B06A.toInt()
                 c.drawText(updates.error ?: "", w / 2f, top + h * 0.08f, text)
@@ -443,13 +489,13 @@ class GameView(
         text.textAlign = Paint.Align.CENTER
         text.textSize = w * 0.046f
         text.color = 0xFFE8C98A.toInt()
-        c.drawText("Выбери кровь", w / 2f, h * 0.055f, text)
+        c.drawText("Выберите героя", w / 2f, h * 0.055f, text)
 
         text.textSize = w * 0.026f
         text.color = 0xFFB05060.toInt()
-        c.drawText("ВАМПИРЫ", w * 0.27f, h * 0.095f, text)
+        c.drawText("Вампиры", w * 0.27f, h * 0.095f, text)
         text.color = 0xFFD4B06A.toInt()
-        c.drawText("СВЯТОЙ ОРДЕН", w * 0.73f, h * 0.095f, text)
+        c.drawText("Святой орден", w * 0.73f, h * 0.095f, text)
 
         val gridTop = h * 0.11f
         val gridBot = h * 0.62f
@@ -479,7 +525,7 @@ class GameView(
         text.color = Color.WHITE
         drawFittedText(c, selected.lore, w / 2f, loreY + h * 0.12f, w * 0.84f, w * 0.032f)
 
-        drawButton(c, w * 0.18f, h * 0.84f, w * 0.64f, h * 0.075f, "В ПОЛЕ", 0xFF6A1824.toInt()) {
+        drawButton(c, w * 0.18f, h * 0.84f, w * 0.64f, h * 0.075f, "Начать", 0xFF6A1824.toInt()) {
             startRun(selected)
         }
     }
@@ -504,12 +550,10 @@ class GameView(
         val textBlock = nameSize + titleSize + bh * 0.08f
         val spriteRoom = (bh - textBlock - 10f).coerceAtLeast(bh * 0.45f)
         val sprite = spriteRoom.coerceAtMost(bw * 0.72f)
-        val clip = assets.characterWalk[def.id]
-        val bmp = clip?.at(titlePulse * 0.7f) ?: assets.characters[def.id]
+        val bmp = assets.characters[def.id]
         if (bmp != null) {
-            val bob = Motion.walkBob(titlePulse + def.id.ordinal, false)
             val dx = x + (bw - sprite) / 2f
-            val dy = y + 6f + bob
+            val dy = y + 6f
             tmp.set(dx, dy, dx + sprite, dy + sprite)
             c.drawBitmap(bmp, null, tmp, spritePaint)
         }
@@ -563,37 +607,56 @@ class GameView(
             }
         }
 
+        val viewRange = 420f
+        Field.forEachNear(camX, camY, viewRange) { prop ->
+            if (prop.kind == PropKind.TREE || prop.kind == PropKind.TREE_WIDE) return@forEachNear
+            drawProp(c, prop, sx(prop.x), sy(prop.y), scale)
+        }
+
         val margin = 80f
         for (g in wld.pickups) {
             val gx = sx(g.x)
             val gy = sy(g.y)
             if (gx < -margin || gy < -margin || gx > w + margin || gy > h + margin) continue
             val pulse = Motion.gemPulse(wld.time * 2f + g.x * 0.01f)
-            paint.color = 0xFF7EC8FF.toInt()
-            c.drawCircle(gx, gy, 5f * scale * pulse, paint)
-            paint.color = 0xAAE8F8FF.toInt()
-            c.drawCircle(gx, gy, 2.2f * scale * pulse, paint)
+            val outer = when (g.kind) {
+                GemKind.SOUL -> 0xFF7EC8FF.toInt()
+                GemKind.GREATER -> 0xFFE8C44A.toInt()
+                GemKind.VITAL -> 0xFFE05060.toInt()
+            }
+            val inner = when (g.kind) {
+                GemKind.SOUL -> 0xAAE8F8FF.toInt()
+                GemKind.GREATER -> 0xAAFFF0B0.toInt()
+                GemKind.VITAL -> 0xAAFFB0B8.toInt()
+            }
+            val r = (if (g.kind == GemKind.SOUL) 5f else 7.2f) * scale * pulse
+            paint.color = outer
+            c.drawCircle(gx, gy, r, paint)
+            paint.color = inner
+            c.drawCircle(gx, gy, r * 0.42f, paint)
         }
         for (e in wld.enemies) {
             val ex = sx(e.x)
             val ey = sy(e.y)
             if (ex < -margin || ey < -margin || ex > w + margin || ey > h + margin) continue
             val clip = assets.enemyWalk[e.kind]
-            val bmp = clip?.at(wld.time) ?: assets.enemies[e.kind]
-            val bob = Motion.walkBob(wld.time + e.x * 0.05f, true)
-            val squash = Motion.walkSquash(wld.time + e.x * 0.05f, true)
+            val bmp = if (wld.enemies.size > 40) {
+                assets.enemies[e.kind]
+            } else {
+                clip?.at(wld.time) ?: assets.enemies[e.kind]
+            }
             val size = e.radius * 2.4f * scale
             if (bmp != null) {
-                c.save()
-                if (e.facing < 0f) c.scale(-1f, 1f, ex, ey)
-                val hw = size / 2f
-                val hh = size / 2f * squash
-                tmp.set(ex - hw, ey - hh + bob, ex + hw, ey + hh + bob)
+                if (e.facing < 0f) {
+                    c.save()
+                    c.scale(-1f, 1f, ex, ey)
+                }
+                tmp.set(ex - size / 2f, ey - size / 2f, ex + size / 2f, ey + size / 2f)
                 c.drawBitmap(bmp, null, tmp, spritePaint)
-                c.restore()
+                if (e.facing < 0f) c.restore()
             } else {
                 paint.color = 0xFF6A5040.toInt()
-                c.drawCircle(ex, ey + bob, e.radius * scale, paint)
+                c.drawCircle(ex, ey, e.radius * scale, paint)
             }
             if (e.hp < e.maxHp) {
                 val bw = e.radius * 2.2f * scale
@@ -608,23 +671,11 @@ class GameView(
             val py = sy(pr.y)
             if (px < -margin || py < -margin || px > w + margin || py > h + margin) continue
             paint.color = when {
-                pr.holy && pr.explode -> 0xFFFFF0B0.toInt()
                 pr.holy -> 0xFFE8D48A.toInt()
                 pr.seek -> 0xFFC04088.toInt()
                 else -> 0xFFB02030.toInt()
             }
-            c.save()
-            c.rotate(Math.toDegrees(Motion.spin(wld.time + pr.x * 0.02f, 14f).toDouble()).toFloat(), px, py)
-            val rr = pr.radius * scale
-            if (pr.orbit || pr.seek) {
-                c.drawCircle(px, py, rr, paint)
-                paint.color = 0x66FFFFFF
-                c.drawCircle(px - rr * 0.3f, py - rr * 0.3f, rr * 0.35f, paint)
-            } else {
-                tmp.set(px - rr, py - rr * 0.55f, px + rr, py + rr * 0.55f)
-                c.drawRoundRect(tmp, rr * 0.4f, rr * 0.4f, paint)
-            }
-            c.restore()
+            c.drawCircle(px, py, pr.radius * scale, paint)
         }
         for (p in wld.particles) {
             val px = sx(p.x)
@@ -635,6 +686,11 @@ class GameView(
             c.drawCircle(px, py, p.size * scale, paint)
         }
         resetPaint()
+
+        Field.forEachNear(camX, camY, viewRange) { prop ->
+            if (prop.kind != PropKind.TREE && prop.kind != PropKind.TREE_WIDE) return@forEachNear
+            drawProp(c, prop, sx(prop.x), sy(prop.y), scale)
+        }
 
         val p = wld.player
         val flash = p.invuln > 0f && ((p.invuln * 20).toInt() % 2 == 0)
@@ -661,6 +717,22 @@ class GameView(
             }
         }
 
+        if (wld.isDawn) {
+            val t = ((wld.time - 420f) / 60f).coerceIn(0f, 1f)
+            paint.color = Color.argb((40 + t * 70).toInt(), 255, 210, 140)
+            c.drawRect(0f, 0f, w, h, paint)
+            resetPaint()
+        }
+        if (!prefs.hideNumbers) {
+            for (f in wld.floats) {
+                val a = (255 * (f.life / f.maxLife)).toInt().coerceIn(0, 255)
+                text.color = (a shl 24) or (f.color and 0x00FFFFFF)
+                text.textAlign = Paint.Align.CENTER
+                text.textSize = 14f * scale
+                c.drawText(f.text, sx(f.x), sy(f.y), text)
+            }
+            text.alpha = 255
+        }
         drawHud(c, wld)
         if (stickId != -1) {
             paint.color = 0x55FFFFFF.toInt()
@@ -669,6 +741,14 @@ class GameView(
             c.drawCircle(stickCx + stickX * 90f, stickCy + stickY * 90f, 34f, paint)
             resetPaint()
         }
+    }
+
+    private fun drawProp(c: Canvas, prop: Prop, x: Float, y: Float, scale: Float) {
+        val bmp = assets.props[prop.kind] ?: return
+        val w = prop.drawW * scale
+        val h = prop.drawH * scale
+        tmp.set(x - w / 2f, y - h * 0.82f, x + w / 2f, y + h * 0.18f)
+        c.drawBitmap(bmp, null, tmp, spritePaint)
     }
 
     private fun posMod(value: Float, mod: Float): Float {
@@ -721,7 +801,7 @@ class GameView(
         c.drawText("%d:%02d".format(sec / 60, sec % 60), w * 0.82f, h * 0.038f, text)
         text.textSize = w * 0.024f
         text.color = 0x88FFFFFF.toInt()
-        c.drawText("ур.${wld.level}  ${wld.kills}", w * 0.82f, h * 0.068f, text)
+        c.drawText("ур. ${wld.level}  ${wld.kills}", w * 0.82f, h * 0.068f, text)
 
         drawButton(c, w * 0.90f, h * 0.018f, w * 0.08f, h * 0.062f, "II", 0x66201018.toInt()) {
             if (screen == Screen.PLAY) screen = Screen.PAUSE
@@ -737,7 +817,7 @@ class GameView(
         text.textAlign = Paint.Align.CENTER
         text.color = 0xFFE8C98A.toInt()
         text.textSize = w * 0.055f
-        c.drawText("Кровь густеет", w / 2f, h * 0.16f, text)
+        c.drawText("Новый уровень", w / 2f, h * 0.16f, text)
         offers.forEachIndexed { i, offer ->
             val y = h * 0.24f + i * h * 0.18f
             paint.color = 0xEE1A1016.toInt()
@@ -760,6 +840,84 @@ class GameView(
         }
     }
 
+    private fun drawChest(c: Canvas) {
+        val wld = world ?: return
+        val offers = wld.pendingChest ?: return
+        dim(c)
+        val w = c.width.toFloat()
+        val h = c.height.toFloat()
+        text.textAlign = Paint.Align.CENTER
+        text.color = 0xFFE8C98A.toInt()
+        text.textSize = w * 0.05f
+        c.drawText("Сундук", w / 2f, h * 0.16f, text)
+        offers.forEachIndexed { i, offer ->
+            val y = h * 0.24f + i * h * 0.18f
+            paint.color = 0xEE1A1016.toInt()
+            tmp.set(w * 0.1f, y, w * 0.9f, y + h * 0.15f)
+            c.drawRoundRect(tmp, 18f, 18f, paint)
+            paint.style = Paint.Style.STROKE
+            paint.color = 0xFFD4B06A.toInt()
+            paint.strokeWidth = 2f
+            c.drawRoundRect(tmp, 18f, 18f, paint)
+            paint.style = Paint.Style.FILL
+            text.color = Color.WHITE
+            drawFittedText(c, offer.title, w / 2f, y + h * 0.06f, w * 0.72f, w * 0.045f)
+            text.color = 0xCCE8D5A3.toInt()
+            drawFittedText(c, offer.body, w / 2f, y + h * 0.105f, w * 0.74f, w * 0.032f)
+            pendingHits += Hit(tmp.left, tmp.top, tmp.right, tmp.bottom) {
+                wld.pick(offer)
+                screen = Screen.PLAY
+            }
+        }
+    }
+
+    private fun drawSettings(c: Canvas) {
+        val w = c.width.toFloat()
+        val h = c.height.toFloat()
+        text.textAlign = Paint.Align.CENTER
+        text.color = 0xFFE8C98A.toInt()
+        text.textSize = w * 0.055f
+        c.drawText("Настройки", w / 2f, h * 0.12f, text)
+
+        text.textAlign = Paint.Align.LEFT
+        text.textSize = w * 0.038f
+        text.color = Color.WHITE
+        c.drawText("Громкость", w * 0.1f, h * 0.22f, text)
+        paint.color = 0xFF2A1014.toInt()
+        tmp.set(w * 0.1f, h * 0.25f, w * 0.9f, h * 0.29f)
+        c.drawRoundRect(tmp, 10f, 10f, paint)
+        paint.color = 0xFFD4B06A.toInt()
+        tmp.right = tmp.left + (w * 0.8f) * prefs.volume
+        c.drawRoundRect(tmp, 10f, 10f, paint)
+        pendingHits += Hit(w * 0.08f, h * 0.23f, w * 0.92f, h * 0.32f) { }
+
+        drawButton(
+            c, w * 0.1f, h * 0.36f, w * 0.8f, h * 0.075f,
+            if (prefs.vibrate) "Вибрация включена" else "Вибрация выключена",
+            0xFF2A1018.toInt(),
+        ) {
+            prefs.vibrate = !prefs.vibrate
+            sfx.vibe(25)
+        }
+        drawButton(
+            c, w * 0.1f, h * 0.46f, w * 0.8f, h * 0.075f,
+            if (prefs.hideNumbers) "Цифры урона скрыты" else "Цифры урона видны",
+            0xFF2A1018.toInt(),
+        ) {
+            prefs.hideNumbers = !prefs.hideNumbers
+        }
+        drawButton(c, w * 0.1f, h * 0.58f, w * 0.8f, h * 0.075f, "Страница игры", 0xFF3A2010.toInt()) {
+            runCatching {
+                context.startActivity(
+                    Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/t1ltof/NightAndOrder")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                )
+            }
+        }
+        drawButton(c, w * 0.2f, h * 0.82f, w * 0.6f, h * 0.075f, "Назад", 0xFF6A1824.toInt()) {
+            screen = settingsBack
+        }
+    }
+
     private fun drawPause(c: Canvas) {
         dim(c)
         val w = c.width.toFloat()
@@ -767,11 +925,15 @@ class GameView(
         text.textAlign = Paint.Align.CENTER
         text.color = 0xFFE8C98A.toInt()
         text.textSize = w * 0.07f
-        c.drawText("Пауза", w / 2f, h * 0.32f, text)
-        drawButton(c, w * 0.2f, h * 0.42f, w * 0.6f, h * 0.08f, "Дальше", 0xFF3A2018.toInt()) {
+        c.drawText("Пауза", w / 2f, h * 0.26f, text)
+        drawButton(c, w * 0.2f, h * 0.36f, w * 0.6f, h * 0.075f, "Продолжить", 0xFF3A2018.toInt()) {
             screen = Screen.PLAY
         }
-        drawButton(c, w * 0.2f, h * 0.54f, w * 0.6f, h * 0.08f, "Оставить поле", 0xFF2A1014.toInt()) {
+        drawButton(c, w * 0.2f, h * 0.46f, w * 0.6f, h * 0.075f, "Настройки", 0xFF2A1810.toInt()) {
+            settingsBack = Screen.PAUSE
+            screen = Screen.SETTINGS
+        }
+        drawButton(c, w * 0.2f, h * 0.56f, w * 0.6f, h * 0.075f, "Выйти в меню", 0xFF2A1014.toInt()) {
             world = null
             screen = Screen.TITLE
         }
@@ -788,7 +950,7 @@ class GameView(
         text.color = if (win) 0xFFE8C98A.toInt() else 0xFFC05060.toInt()
         drawFittedText(
             c,
-            if (win) "Рассвет застал вас" else "Поле взяло своё",
+            if (win) "Вы дожили до рассвета" else "Вы пали",
             w / 2f,
             h * 0.28f,
             w * 0.86f,
@@ -798,19 +960,19 @@ class GameView(
         text.color = Color.WHITE
         val sec = wld.time.toInt()
         c.drawText("${wld.character.name}  ·  ${"%d:%02d".format(sec / 60, sec % 60)}", w / 2f, h * 0.38f, text)
-        c.drawText("убито  ${wld.kills}     круг  ${wld.level}", w / 2f, h * 0.45f, text)
+        c.drawText("убийств: ${wld.kills}     уровень: ${wld.level}", w / 2f, h * 0.45f, text)
         text.textSize = w * 0.032f
         text.color = 0x88E8D5A3.toInt()
         val line = if (wld.character.faction == Faction.VAMPIRE) {
-            if (wld.power.rite > 0.45f) "Ночь запомнила этот час." else "Рассвет был слишком близко."
+            if (wld.power.rite > 0.45f) "Ночь была на вашей стороне." else "На свету вампиру тяжело."
         } else {
-            if (wld.power.rite > 0.55f) "Свет видел каждый ваш удар." else "Сияние сегодня было тусклым."
+            if (wld.power.rite > 0.55f) "Свет держал вас до конца." else "Сегодня рассвета почти не было."
         }
         c.drawText(line, w / 2f, h * 0.54f, text)
         drawButton(c, w * 0.18f, h * 0.66f, w * 0.64f, h * 0.08f, "Ещё раз", 0xFF6A1824.toInt()) {
             startRun(wld.character)
         }
-        drawButton(c, w * 0.18f, h * 0.78f, w * 0.64f, h * 0.08f, "К выбору", 0xFF2A1018.toInt()) {
+        drawButton(c, w * 0.18f, h * 0.78f, w * 0.64f, h * 0.08f, "К героям", 0xFF2A1018.toInt()) {
             world = null
             screen = Screen.SELECT
         }

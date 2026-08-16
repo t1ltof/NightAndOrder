@@ -16,7 +16,9 @@ class MainActivity : AppCompatActivity() {
         brightness.start()
         updates = UpdateClient(this)
         updates.check()
-        game = GameView(this, brightness, updates)
+        val prefs = Prefs(this)
+        val sfx = Sfx(this, prefs)
+        game = GameView(this, brightness, updates, prefs, sfx)
         setContentView(game)
     }
 

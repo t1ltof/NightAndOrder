@@ -31,7 +31,13 @@ class Enemy(
     var xp: Int,
     var touchCd: Float = 0f,
     var facing: Float = 1f,
+    var role: Role = Role.MOB,
+    var invuln: Boolean = false,
 )
+
+enum class Role { MOB, BOSS, SERVANT }
+
+enum class GemKind { SOUL, GREATER, VITAL }
 
 class Projectile(
     var x: Float,
@@ -57,7 +63,17 @@ class Pickup(
     var x: Float,
     var y: Float,
     var value: Int,
+    var kind: GemKind = GemKind.SOUL,
     var life: Float = 40f,
+)
+
+class FloatNum(
+    var x: Float,
+    var y: Float,
+    val text: String,
+    val color: Int,
+    var life: Float = 0.7f,
+    val maxLife: Float = 0.7f,
 )
 
 class Particle(
@@ -84,7 +100,12 @@ sealed class Offer(val title: String, val body: String) {
     class WeaponNew(val id: WeaponId, title: String, body: String) : Offer(title, body)
     class WeaponUp(val id: WeaponId, val next: Int, title: String, body: String) : Offer(title, body)
     class PassiveUp(val id: PassiveId, val next: Int, title: String, body: String) : Offer(title, body)
+    class Evolve(val evo: Catalog.Evolution, title: String, body: String) : Offer(title, body)
+    class Ritual(title: String, body: String) : Offer(title, body)
+    class Curse(title: String, body: String) : Offer(title, body)
 }
+
+enum class BossPhase { GUARD, OPEN, RAGE }
 
 enum class RunEnd { DEAD, DAWN }
 
@@ -94,6 +115,8 @@ class World(val character: CharacterDef) {
     val projectiles = ArrayList<Projectile>(160)
     val pickups = ArrayList<Pickup>(256)
     val particles = ArrayList<Particle>(200)
+    val floats = ArrayList<FloatNum>(64)
+    val events = ArrayList<Cue>(8)
     val weapons = ArrayList<WeaponInst>()
     val passives = Passives()
     val rng = Random(System.nanoTime())
@@ -106,28 +129,53 @@ class World(val character: CharacterDef) {
     var brightness = 0.55f
     var spawnAcc = 0f
     var eliteAcc = 0f
-    var end: RunEnd? = null
+    var nextChest = 90f
     var pendingOffers: List<Offer>? = null
+    var pendingChest: List<Offer>? = null
+    var ritualLeft = 0f
+    var curseMul = 1f
+    var dawnStarted = false
+    var boss: Enemy? = null
+    var bossPhase = BossPhase.GUARD
+    var rageCd = 0f
+    var humCd = 0f
+    private var hitSfxCd = 0f
+    private var spawnedAt180 = false
+    private var spawnedAt360 = false
+    var end: RunEnd? = null
     var inputX = 0f
     var inputY = 0f
 
     val power get() = BrightnessPower.of(character.faction, brightness)
+    val isDawn get() = time >= 420f
 
     init {
         weapons += WeaponInst(character.signature, 1)
     }
 
-    fun damageMul() = power.damage * (1f + passives.lv(PassiveId.DAMAGE) * 0.18f)
+    fun damageMul(): Float {
+        var m = power.damage * (1f + passives.lv(PassiveId.DAMAGE) * 0.18f) * curseMul
+        if (ritualLeft > 0f) m *= 1.12f
+        if (isDawn && character.faction == Faction.HOLY) m *= 1.22f
+        return m
+    }
     fun cooldownMul() = (1f / power.ability) * (1f - passives.lv(PassiveId.COOLDOWN) * 0.08f).coerceAtLeast(0.45f)
     fun areaMul() = (0.85f + power.ability * 0.25f) * (1f + passives.lv(PassiveId.AREA) * 0.12f)
     fun extraShots() = passives.lv(PassiveId.PROJECTILES)
-    fun magnet() = 48f + passives.lv(PassiveId.MAGNET) * 28f
+    fun magnet() = 52f + passives.lv(PassiveId.MAGNET) * 70f + if (ritualLeft > 0f) 90f else 0f
+    fun magnetPull() = 200f + passives.lv(PassiveId.MAGNET) * 140f
     fun armor() = passives.lv(PassiveId.ARMOR) * 0.08f
-    fun moveSpeed() = character.speed * (1f + passives.lv(PassiveId.SPEED) * 0.08f)
+    fun moveSpeed() = character.speed * (1f + passives.lv(PassiveId.SPEED) * 0.08f) *
+        if (ritualLeft > 0f) 1.22f else 1f
+
+    fun emit(c: Cue) { events += c }
 
     fun tick(dt: Float) {
-        if (end != null || pendingOffers != null) return
+        tickFloats(dt)
+        if (end != null || pendingOffers != null || pendingChest != null) return
         time += dt
+        ritualLeft = (ritualLeft - dt).coerceAtLeast(0f)
+        hitSfxCd = (hitSfxCd - dt).coerceAtLeast(0f)
         if (time >= RUN_SECONDS) {
             end = RunEnd.DAWN
             return
@@ -147,15 +195,22 @@ class World(val character: CharacterDef) {
         }
         player.x += player.vx * dt
         player.y += player.vy * dt
+        val pushed = Field.pushOut(player.x, player.y, player.def.radius)
+        player.x = pushed.first
+        player.y = pushed.second
         player.invuln = (player.invuln - dt).coerceAtLeast(0f)
 
         tickWeapons(dt)
         tickProjectiles(dt)
         spawn(dt)
         tickEnemies(dt)
+        tickBoss(dt)
         collide()
         tickPickups(dt)
         tickParticles(dt)
+        tickDawn(dt)
+        tickChest()
+        tickHum(dt)
     }
 
     private fun tickWeapons(dt: Float) {
@@ -298,6 +353,87 @@ class World(val character: CharacterDef) {
                         }
                     }
                 }
+                WeaponId.FANG_STORM -> {
+                    val interval = (0.38f - w.level * 0.02f).coerceAtLeast(0.16f) * cooldownMul()
+                    if (w.cd <= 0f) {
+                        w.cd = interval
+                        val n = 3 + w.level / 2 + shots
+                        repeat(n) { i ->
+                            val t = nearest(p.x, p.y, skip = i) ?: return@repeat
+                            val a = atan2(t.y - p.y, t.x - p.x) + (i - n / 2f) * 0.1f
+                            shoot(p.x, p.y, a, 280f, (11f + w.level * 2.8f) * dmg, 0.65f, 6f * area, 1, false)
+                        }
+                    }
+                }
+                WeaponId.BLOOD_ECLIPSE -> {
+                    val interval = (1.8f - w.level * 0.08f).coerceAtLeast(0.8f) * cooldownMul()
+                    if (w.cd <= 0f) {
+                        w.cd = interval
+                        nova(p.x, p.y, (64f + w.level * 9f) * area, (22f + w.level * 5f) * dmg, false)
+                    }
+                    val want = 3 + w.level / 2 + shots
+                    val have = projectiles.count { it.orbit && !it.holy }
+                    if (have < want) {
+                        projectiles += Projectile(
+                            p.x, p.y, 0f, 0f, 999f, 10f * area,
+                            (9f + w.level * 2.4f) * dmg, 99, false,
+                            orbit = true, orbitRadius = 50f + w.level * 5f, orbitSpeed = 2.4f,
+                        )
+                    }
+                }
+                WeaponId.HEX_SWARM -> {
+                    val interval = (0.55f - w.level * 0.03f).coerceAtLeast(0.22f) * cooldownMul()
+                    if (w.cd <= 0f) {
+                        w.cd = interval
+                        val n = 3 + shots
+                        repeat(n) { i ->
+                            val t = nearest(p.x, p.y, skip = i) ?: return@repeat
+                            val a = atan2(t.y - p.y, t.x - p.x) + (i - 1) * 0.22f
+                            projectiles += Projectile(
+                                p.x, p.y, cos(a) * 190f, sin(a) * 190f,
+                                1.2f, 8f * area, (13f + w.level * 3.2f) * dmg, 1, false,
+                                seek = true, seekTurn = 9f, explode = true,
+                                explodeRadius = (32f + w.level * 5f) * area,
+                            )
+                        }
+                    }
+                }
+                WeaponId.SOLAR_CROWN -> {
+                    val interval = (0.7f - w.level * 0.03f).coerceAtLeast(0.25f) * cooldownMul()
+                    if (w.cd <= 0f) {
+                        w.cd = interval
+                        val n = 8 + w.level + shots
+                        repeat(n) { i ->
+                            val a = i * (Math.PI.toFloat() * 2f / n) + time
+                            shoot(p.x, p.y, a, 240f, (9f + w.level * 2.2f) * dmg, 0.85f, 7f * area, 1, true)
+                        }
+                    }
+                }
+                WeaponId.FINAL_WORD -> {
+                    val interval = (0.7f - w.level * 0.03f).coerceAtLeast(0.26f) * cooldownMul()
+                    if (w.cd <= 0f) {
+                        w.cd = interval
+                        val n = 2 + w.level / 3 + shots
+                        repeat(n) { i ->
+                            val t = nearest(p.x, p.y, skip = i) ?: return@repeat
+                            val a = atan2(t.y - p.y, t.x - p.x)
+                            shoot(p.x, p.y, a, 320f, (12f + w.level * 3f) * dmg, 0.8f, 6f * area, 2, true)
+                            nova(t.x, t.y, (28f + w.level * 4f) * area, (10f + w.level * 2.4f) * dmg, true)
+                        }
+                    }
+                }
+                WeaponId.HALLOWED_GROUND -> {
+                    val interval = 0.22f * cooldownMul()
+                    if (w.cd <= 0f) {
+                        w.cd = interval
+                        val r = (56f + w.level * 8f) * area
+                        val hit = (6f + w.level * 1.6f) * dmg
+                        for (e in enemies) {
+                            if (e.hp <= 0f) continue
+                            if (dist2(e.x, e.y, p.x, p.y) <= r * r) hurtEnemy(e, hit)
+                        }
+                    }
+                }
             }
         }
         var orbitCount = 0
@@ -363,10 +499,15 @@ class World(val character: CharacterDef) {
                 }
             }
             var hit = false
+            val reach = 70f
             for (e in enemies) {
                 if (e.hp <= 0f) continue
+                val dx = e.x - pr.x
+                if (dx > reach || dx < -reach) continue
+                val dy = e.y - pr.y
+                if (dy > reach || dy < -reach) continue
                 val rr = pr.radius + e.radius
-                if (dist2(pr.x, pr.y, e.x, e.y) <= rr * rr) {
+                if (dx * dx + dy * dy <= rr * rr) {
                     hurtEnemy(e, pr.damage)
                     hit = true
                     if (!pr.orbit) {
@@ -387,12 +528,12 @@ class World(val character: CharacterDef) {
 
     private fun spawn(dt: Float) {
         val cap = when {
-            time > 360f -> 110
-            time > 240f -> 90
-            time > 120f -> 70
-            else -> 50
+            time > 360f -> 70
+            time > 240f -> 55
+            time > 120f -> 45
+            else -> 32
         }
-        val rate = 1.6f + time / 70f
+        val rate = 1.1f + time / 90f
         spawnAcc += dt * rate
         while (spawnAcc >= 1f && enemies.size < cap) {
             spawnAcc -= 1f
@@ -410,9 +551,13 @@ class World(val character: CharacterDef) {
                 it.xp += 8
             }
         }
-        if (time.toInt() in listOf(180, 360) && enemies.none { it.kind == EnemyKind.BOSS }) {
-            val (x, y) = spawnPoint()
-            enemies += makeEnemy(EnemyKind.BOSS, x, y)
+        if (time >= 180f && !spawnedAt180) {
+            spawnedAt180 = true
+            spawnBoss()
+        }
+        if (time >= 360f && !spawnedAt360) {
+            spawnedAt360 = true
+            spawnBoss()
         }
     }
 
@@ -444,7 +589,15 @@ class World(val character: CharacterDef) {
     private fun spawnPoint(): Pair<Float, Float> {
         val a = rng.nextFloat() * Math.PI.toFloat() * 2f
         val d = 380f + rng.nextFloat() * 80f
-        return player.x + cos(a) * d to player.y + sin(a) * d
+        var x = player.x + cos(a) * d
+        var y = player.y + sin(a) * d
+        repeat(4) {
+            if (!Field.blocked(x, y, 20f)) return x to y
+            val b = rng.nextFloat() * Math.PI.toFloat() * 2f
+            x = player.x + cos(b) * d
+            y = player.y + sin(b) * d
+        }
+        return x to y
     }
 
     private fun makeEnemy(kind: EnemyKind, x: Float, y: Float): Enemy {
@@ -468,6 +621,11 @@ class World(val character: CharacterDef) {
             val m = hypot(dx, dy).coerceAtLeast(0.001f)
             e.x += dx / m * e.speed * dt
             e.y += dy / m * e.speed * dt
+            if (e.kind != EnemyKind.BAT) {
+                val ep = Field.pushOut(e.x, e.y, e.radius)
+                e.x = ep.first
+                e.y = ep.second
+            }
             if (dx != 0f) e.facing = if (dx > 0f) 1f else -1f
             e.touchCd = (e.touchCd - dt).coerceAtLeast(0f)
         }
@@ -506,7 +664,9 @@ class World(val character: CharacterDef) {
                 player.hp -= taken
                 player.invuln = 0.45f
                 e.touchCd = 0.35f
+                emit(Cue.HURT)
                 burst(player.x, player.y, 0xFFCC3344.toInt(), 10, 40f)
+                pushFloat(player.x, player.y - 12f, "-${taken.toInt()}", 0xFFFF6677.toInt())
                 if (player.hp <= 0f) {
                     player.hp = 0f
                     end = RunEnd.DEAD
@@ -518,29 +678,68 @@ class World(val character: CharacterDef) {
 
     private fun hurtEnemy(e: Enemy, amount: Float) {
         if (e.hp <= 0f) return
+        if (e.invuln) return
         e.hp -= amount
+        pushFloat(e.x, e.y - 10f, amount.toInt().toString(), 0xFFFFE8A0.toInt())
+        if (hitSfxCd <= 0f) {
+            emit(Cue.HIT)
+            hitSfxCd = 0.06f
+        }
         if (e.hp <= 0f) {
             e.hp = 0f
             kills += 1
-            pickups += Pickup(e.x, e.y, e.xp)
-            burst(e.x, e.y, 0xFFD0C8B0.toInt(), 8, 30f)
+            if (e.role == Role.BOSS) {
+                pickups += Pickup(e.x, e.y, 40, GemKind.GREATER)
+                pickups += Pickup(e.x + 12f, e.y, 1, GemKind.VITAL)
+                emit(Cue.BOSS)
+            } else {
+                dropGem(e.x, e.y, e.xp)
+            }
+            burst(e.x, e.y, 0xFFD0C8B0.toInt(), 6, 28f)
         }
+    }
+
+    private fun dropGem(x: Float, y: Float, base: Int) {
+        val r = rng.nextFloat()
+        val kind = when {
+            r < 0.05f -> GemKind.VITAL
+            r < 0.16f -> GemKind.GREATER
+            else -> GemKind.SOUL
+        }
+        val value = if (kind == GemKind.GREATER) base * 5 else base
+        pickups += Pickup(x, y, value, kind)
     }
 
     private fun tickPickups(dt: Float) {
         val mag = magnet()
+        val pullSpd = magnetPull()
         val it = pickups.iterator()
         while (it.hasNext()) {
             val g = it.next()
             g.life -= dt
             val d = hypot(player.x - g.x, player.y - g.y)
             if (d < mag) {
-                val pull = 220f * dt
+                val pull = pullSpd * dt
                 g.x += (player.x - g.x) / d.coerceAtLeast(1f) * pull
                 g.y += (player.y - g.y) / d.coerceAtLeast(1f) * pull
             }
             if (d < 18f) {
-                addXp(g.value)
+                when (g.kind) {
+                    GemKind.SOUL -> {
+                        addXp(g.value)
+                        emit(Cue.GEM)
+                    }
+                    GemKind.GREATER -> {
+                        addXp(g.value)
+                        emit(Cue.GEM_RARE)
+                    }
+                    GemKind.VITAL -> {
+                        val heal = player.maxHp * 0.10f
+                        player.hp = min(player.maxHp, player.hp + heal)
+                        pushFloat(player.x, player.y - 16f, "+${heal.toInt()}", 0xFF66FF99.toInt())
+                        emit(Cue.HEAL)
+                    }
+                }
                 it.remove()
             } else if (g.life <= 0f) {
                 it.remove()
@@ -556,6 +755,7 @@ class World(val character: CharacterDef) {
             level += 1
             xpToNext = (6 + level * 4 + (level * level) / 6).coerceAtMost(80)
             pendingOffers = rollOffers()
+            emit(Cue.LEVEL)
         }
     }
 
@@ -578,7 +778,7 @@ class World(val character: CharacterDef) {
         for (def in Catalog.passives) {
             val lv = passives.lv(def.id)
             if (lv < def.maxLevel) {
-                pool += Offer.PassiveUp(def.id, lv + 1, def.name, "${def.blurb} (${lv + 1})")
+                pool += Offer.PassiveUp(def.id, lv + 1, def.name, "Уровень ${lv + 1}. ${def.blurb}")
             }
         }
         pool.shuffle(rng)
@@ -597,8 +797,20 @@ class World(val character: CharacterDef) {
                     player.hp = min(player.maxHp, player.hp + add)
                 }
             }
+            is Offer.Evolve -> {
+                weapons.removeAll { it.id == offer.evo.a || it.id == offer.evo.b }
+                weapons += WeaponInst(offer.evo.result, 1)
+            }
+            is Offer.Ritual -> ritualLeft = 28f
+            is Offer.Curse -> {
+                curseMul = 1.4f
+                val cut = player.maxHp * 0.22f
+                player.maxHp = (player.maxHp - cut).coerceAtLeast(30f)
+                player.hp = min(player.hp, player.maxHp)
+            }
         }
         pendingOffers = null
+        pendingChest = null
     }
 
     private fun tickParticles(dt: Float) {
@@ -611,6 +823,153 @@ class World(val character: CharacterDef) {
             if (p.life <= 0f) it.remove()
         }
         if (particles.size > 70) particles.subList(0, particles.size - 70).clear()
+    }
+
+    private fun spawnBoss() {
+        val (x, y) = spawnPoint()
+        val b = makeEnemy(EnemyKind.BOSS, x, y)
+        b.role = Role.BOSS
+        b.invuln = true
+        b.hp *= 1.15f
+        b.maxHp = b.hp
+        enemies += b
+        boss = b
+        bossPhase = BossPhase.GUARD
+        spawnServants(6)
+        emit(Cue.BOSS)
+    }
+
+    private fun spawnServants(n: Int) {
+        val b = boss ?: return
+        repeat(n) { i ->
+            val a = i * (Math.PI.toFloat() * 2f / n)
+            val s = makeEnemy(EnemyKind.FLAGELLANT, b.x + cos(a) * 70f, b.y + sin(a) * 70f)
+            s.role = Role.SERVANT
+            s.hp *= 0.8f
+            s.maxHp = s.hp
+            enemies += s
+        }
+    }
+
+    private fun servantsAlive() = enemies.count { it.role == Role.SERVANT && it.hp > 0f }
+
+    private fun tickBoss(dt: Float) {
+        val b = boss ?: return
+        if (b.hp <= 0f) {
+            boss = null
+            return
+        }
+        when (bossPhase) {
+            BossPhase.GUARD -> {
+                b.invuln = servantsAlive() > 0
+                if (!b.invuln) bossPhase = BossPhase.OPEN
+            }
+            BossPhase.OPEN -> {
+                b.invuln = false
+                if (b.hp < b.maxHp * 0.5f) {
+                    bossPhase = BossPhase.RAGE
+                    spawnServants(4)
+                    emit(Cue.BOSS)
+                }
+            }
+            BossPhase.RAGE -> {
+                b.invuln = false
+                rageCd -= dt
+                val dark = brightness < 0.4f
+                if (rageCd <= 0f) {
+                    rageCd = if (dark) 1.1f else 1.8f
+                    val r = if (dark) 88f else 70f
+                    if (dist2(player.x, player.y, b.x, b.y) < r * r) {
+                        val taken = if (dark) 14f else 10f
+                        player.hp -= taken * (1f - armor())
+                        emit(Cue.HURT)
+                        pushFloat(player.x, player.y - 14f, "-${taken.toInt()}", 0xFFFF6677.toInt())
+                        if (player.hp <= 0f) {
+                            player.hp = 0f
+                            end = RunEnd.DEAD
+                        }
+                    }
+                    burst(b.x, b.y, if (dark) 0xFF8B1E2D.toInt() else 0xFFE8D48A.toInt(), 10, r)
+                }
+            }
+        }
+        var i = 0
+        val n = servantsAlive().coerceAtLeast(1)
+        for (e in enemies) {
+            if (e.role != Role.SERVANT || e.hp <= 0f) continue
+            val a = time * 1.2f + i * (Math.PI.toFloat() * 2f / n)
+            e.x = b.x + cos(a) * 74f
+            e.y = b.y + sin(a) * 74f
+            i++
+        }
+    }
+
+    private fun tickDawn(dt: Float) {
+        if (!isDawn) return
+        if (!dawnStarted) {
+            dawnStarted = true
+            emit(Cue.DAWN)
+        }
+        if (character.faction == Faction.VAMPIRE && brightness > 0.22f) {
+            val burn = (3.5f + 14f * brightness) * dt
+            player.hp -= burn
+            if (player.hp <= 0f) {
+                player.hp = 0f
+                end = RunEnd.DEAD
+            }
+        }
+    }
+
+    private fun tickChest() {
+        if (time < nextChest || pendingOffers != null || pendingChest != null) return
+        nextChest += 90f
+        pendingChest = rollChest()
+        emit(Cue.CHEST)
+    }
+
+    private fun rollChest(): List<Offer> {
+        val list = ArrayList<Offer>(3)
+        val owned = weapons.map { it.id }.toSet()
+        val lv = { id: WeaponId -> weapons.find { it.id == id }?.level ?: 0 }
+        val evo = Catalog.readyEvo(owned, lv)
+        if (evo != null) {
+            val res = Catalog.weapon(evo.result)
+            list += Offer.Evolve(
+                evo,
+                res.name,
+                "Сложить два оружия в одно сильнее. ${res.blurb}",
+            )
+        }
+        list += Offer.Ritual("Короткий обряд", "28 секунд: вы бежите быстрее, бьёте чуть сильнее, сферы летят сами.")
+        list += Offer.Curse("Кровавая клятва", "Весь забег: +40% урона, но максимальное здоровье падает на 22%.")
+        if (list.size < 3) {
+            list += Offer.Ritual("Жажда сфер", "На 28 секунд сферы опыта сами летят к вам.")
+        }
+        return list.take(3)
+    }
+
+    private fun tickHum(dt: Float) {
+        humCd -= dt
+        if (humCd > 0f) return
+        humCd = 3.6f
+        val rite = power.rite
+        if (character.faction == Faction.VAMPIRE && rite > 0.45f) emit(Cue.HUM_DARK)
+        else if (character.faction == Faction.HOLY && rite > 0.55f) emit(Cue.HUM_LIGHT)
+    }
+
+    private fun tickFloats(dt: Float) {
+        val it = floats.iterator()
+        while (it.hasNext()) {
+            val f = it.next()
+            f.life -= dt
+            f.y -= 22f * dt
+            if (f.life <= 0f) it.remove()
+        }
+        if (floats.size > 40) floats.subList(0, floats.size - 40).clear()
+    }
+
+    private fun pushFloat(x: Float, y: Float, text: String, color: Int) {
+        floats += FloatNum(x, y, text, color)
     }
 
     private fun burst(x: Float, y: Float, color: Int, n: Int, speed: Float) {

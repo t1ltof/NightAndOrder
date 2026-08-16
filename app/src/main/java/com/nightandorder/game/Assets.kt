@@ -12,9 +12,12 @@ class Assets(context: Context) {
     val enemies = HashMap<EnemyKind, Bitmap>()
     val characterWalk = HashMap<CharacterId, SpriteClip>()
     val enemyWalk = HashMap<EnemyKind, SpriteClip>()
+    val props = HashMap<PropKind, Bitmap>()
     var tile: Bitmap? = null
         private set
     var ground: Bitmap? = null
+        private set
+    var menuBg: Bitmap? = null
         private set
 
     init {
@@ -90,7 +93,15 @@ class Assets(context: Context) {
         enemyWalk[EnemyKind.KNIGHT] = clipOrStill("walk_knight.png", enemies.getValue(EnemyKind.KNIGHT), 96)
         enemyWalk[EnemyKind.BOSS] = clipOrStill("walk_boss.png", enemies.getValue(EnemyKind.BOSS), 160)
 
-        tile = load("tile_ground.png", 96)
+        props[PropKind.ROCK] = load("prop_rock.png", 96) ?: fallback(0xFF4A4A52.toInt(), 72)
+        props[PropKind.STONE] = load("prop_stone.png", 72) ?: fallback(0xFF6A6A70.toInt(), 56)
+        props[PropKind.TREE] = load("prop_tree.png", 128) ?: fallback(0xFF1A2018.toInt(), 96)
+        props[PropKind.TREE_WIDE] = load("prop_tree2.png", 140) ?: fallback(0xFF142018.toInt(), 104)
+
+        tile = load("tile_ground.png", 128)
+        menuBg = runCatching {
+            am.open("menu_bg.jpg").use { BitmapFactory.decodeStream(it) }
+        }.getOrNull()
         ground = tile?.let { src ->
             val cell = src.width
             val sheet = Bitmap.createBitmap(cell * 4, cell * 4, Bitmap.Config.RGB_565)
