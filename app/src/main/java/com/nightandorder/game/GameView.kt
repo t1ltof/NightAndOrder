@@ -7,6 +7,8 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.LinearGradient
 import android.graphics.Paint
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffColorFilter
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
@@ -22,7 +24,7 @@ import kotlin.math.hypot
 import kotlin.math.min
 import kotlin.math.sin
 
-enum class Screen { TITLE, SELECT, META, PLAY, LEVELUP, PAUSE, END, SETTINGS, CHEST }
+enum class Screen { TITLE, SELECT, META, CHRONICLE, PLAY, LEVELUP, PAUSE, END, SETTINGS, CHEST }
 
 class GameView(
     context: Context,
@@ -33,6 +35,7 @@ class GameView(
 ) : View(context), Choreographer.FrameCallback {
 
     private val assets = Assets(context)
+    private val music = Music(prefs)
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val spritePaint = Paint().apply { isFilterBitmap = false }
     private val text = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -49,10 +52,11 @@ class GameView(
     private var settingsBack = Screen.TITLE
     private var sliderHeld = false
     private var world: World? = null
-    private var selected: CharacterDef = Catalog.characters[0]
+    private var selected: CharacterDef = Catalog.characters.first { Chronicle.isOpen(prefs, it.id) }
     private var metaHeroTab = true
     private var payoutDone = false
     private var lastPayout = 0
+    private var lastUnlocks: List<CharacterId> = emptyList()
     private var riteSnap = Rites.sample(context)
 
     private var stickId = -1
@@ -84,6 +88,7 @@ class GameView(
         isFocusableInTouchMode = true
         keepScreenOn = true
         isClickable = true
+        music.start()
     }
 
     private fun resetPaint() {
@@ -95,6 +100,7 @@ class GameView(
     }
 
     fun onResumeGame() {
+        music.resume()
         startLoop()
     }
 
@@ -103,6 +109,7 @@ class GameView(
             (screen == Screen.PLAY || screen == Screen.LEVELUP || screen == Screen.CHEST)
         if (inRun) world?.lookAway()
         if (screen == Screen.PLAY) screen = Screen.PAUSE
+        music.pause()
         stopLoop()
     }
 
@@ -118,6 +125,10 @@ class GameView(
             }
             Screen.META -> {
                 screen = Screen.SELECT
+                true
+            }
+            Screen.CHRONICLE -> {
+                screen = Screen.TITLE
                 true
             }
             Screen.PAUSE, Screen.LEVELUP, Screen.CHEST -> true
@@ -136,6 +147,7 @@ class GameView(
 
     override fun onDetachedFromWindow() {
         stopLoop()
+        music.release()
         super.onDetachedFromWindow()
     }
 
@@ -167,6 +179,7 @@ class GameView(
             steps++
         }
         if (acc > STEP * 5f) acc = 0f
+        syncMusic()
         if (frameTimeNanos - lastBrightNs > 500_000_000L) {
             brightness.refresh()
             riteSnap = Rites.sample(context)
@@ -210,6 +223,7 @@ class GameView(
                     if (!payoutDone) {
                         payoutDone = true
                         lastPayout = Meta.award(prefs, w)
+                        lastUnlocks = Chronicle.record(prefs, w)
                     }
                     screen = Screen.END
                 }
@@ -223,6 +237,7 @@ class GameView(
             when (e) {
                 Cue.HURT -> sfx.vibe(40, 160)
                 Cue.LEVEL, Cue.CHEST -> sfx.vibe(30, 90)
+                Cue.HIT, Cue.KILL -> sfx.vibe(18, 90)
                 Cue.BOSS, Cue.DAWN -> sfx.vibe(80, 200)
                 Cue.HUM_DARK -> sfx.vibe(50, 140)
                 else -> Unit
@@ -232,6 +247,7 @@ class GameView(
     }
 
     private fun startRun(def: CharacterDef) {
+        if (!Chronicle.isOpen(prefs, def.id)) return
         riteSnap = Rites.sample(context)
         val mods = Rites.mods(def.faction, def.id, riteSnap)
         world = World(def, Meta.resolve(prefs, def), mods)
@@ -241,6 +257,7 @@ class GameView(
         stickY = 0f
         payoutDone = false
         lastPayout = 0
+        lastUnlocks = emptyList()
         screen = Screen.PLAY
     }
 
@@ -332,6 +349,7 @@ class GameView(
         val w = width.toFloat()
         prefs.volume = ((x - w * 0.1f) / (w * 0.8f)).coerceIn(0f, 1f)
         sfx.rebuild()
+        music.setVolume()
     }
 
     private fun onTap(x: Float, y: Float) {
@@ -352,6 +370,7 @@ class GameView(
             Screen.TITLE -> drawTitle(c)
             Screen.SELECT -> drawSelect(c)
             Screen.META -> drawMeta(c)
+            Screen.CHRONICLE -> drawChronicle(c)
             Screen.SETTINGS -> {
                 drawBackdrop(c, true)
                 drawSettings(c)
@@ -431,6 +450,9 @@ class GameView(
         text.textSize = w * 0.028f
         text.color = 0x66E8D5A3.toInt()
         c.drawText(BuildConfig.VERSION_NAME, w / 2f, h * 0.57f, text)
+        drawButton(c, w * 0.04f, h * 0.03f, w * 0.24f, h * 0.055f, "Хроника", 0xAA201018.toInt()) {
+            screen = Screen.CHRONICLE
+        }
         drawButton(c, w * 0.72f, h * 0.03f, w * 0.24f, h * 0.055f, "Настройки", 0xAA201018.toInt()) {
             settingsBack = Screen.TITLE
             screen = Screen.SETTINGS
@@ -550,15 +572,23 @@ class GameView(
         paint.color = 0xCC120814.toInt()
         tmp.set(w * 0.055f, loreY, w * 0.945f, h * 0.81f)
         c.drawRoundRect(tmp, 18f, 18f, paint)
+        val open = Chronicle.isOpen(prefs, selected.id)
         text.color = 0xFFE8D5A3.toInt()
         text.textSize = w * 0.042f
-        c.drawText(selected.name, w / 2f, loreY + h * 0.035f, text)
+        c.drawText(if (open) selected.name else "???", w / 2f, loreY + h * 0.035f, text)
         text.textSize = w * 0.026f
         text.color = 0x88E8D5A3.toInt()
-        c.drawText(selected.title, w / 2f, loreY + h * 0.062f, text)
+        c.drawText(if (open) selected.title else "ещё не в хронике", w / 2f, loreY + h * 0.062f, text)
         text.textSize = w * 0.028f
         text.color = Color.WHITE
-        drawFittedText(c, selected.lore, w / 2f, loreY + h * 0.10f, w * 0.84f, w * 0.028f)
+        drawFittedText(
+            c,
+            if (open) selected.lore else Chronicle.hint(selected.id),
+            w / 2f,
+            loreY + h * 0.10f,
+            w * 0.84f,
+            w * 0.028f,
+        )
         text.textSize = w * 0.026f
         text.color = 0xFFD4B06A.toInt()
         val marks = prefs.charMarks(selected.id)
@@ -580,16 +610,21 @@ class GameView(
             w * 0.024f,
         )
 
-        drawButton(c, w * 0.055f, h * 0.835f, w * 0.42f, h * 0.075f, "Наследие", 0xFF3A2018.toInt()) {
-            metaHeroTab = true
-            screen = Screen.META
-        }
-        drawButton(c, w * 0.525f, h * 0.835f, w * 0.42f, h * 0.075f, "Начать", 0xFF6A1824.toInt()) {
-            startRun(selected)
+        if (open) {
+            drawButton(c, w * 0.055f, h * 0.835f, w * 0.42f, h * 0.075f, "Наследие", 0xFF3A2018.toInt()) {
+                metaHeroTab = true
+                screen = Screen.META
+            }
+            drawButton(c, w * 0.525f, h * 0.835f, w * 0.42f, h * 0.075f, "Начать", 0xFF6A1824.toInt()) {
+                startRun(selected)
+            }
+        } else {
+            drawButton(c, w * 0.18f, h * 0.835f, w * 0.64f, h * 0.075f, "Ещё не в хронике", 0xFF2A1018.toInt()) { }
         }
     }
 
     private fun drawPortraitCard(c: Canvas, def: CharacterDef, x: Float, y: Float, bw: Float, bh: Float) {
+        val open = Chronicle.isOpen(prefs, def.id)
         val chosen = def.id == selected.id
         paint.color = if (chosen) {
             if (def.faction == Faction.VAMPIRE) 0xAA5A1020.toInt() else 0xAA3A3420.toInt()
@@ -614,17 +649,26 @@ class GameView(
             val dx = x + (bw - sprite) / 2f
             val dy = y + 6f
             tmp.set(dx, dy, dx + sprite, dy + sprite)
+            if (!open) spritePaint.alpha = 70
             c.drawBitmap(bmp, null, tmp, spritePaint)
+            spritePaint.alpha = 255
         }
         val nameY = y + 6f + sprite + nameSize
         text.textAlign = Paint.Align.CENTER
         text.textSize = nameSize
-        text.color = Color.WHITE
-        drawFittedText(c, def.name, x + bw / 2f, nameY, bw * 0.9f, nameSize)
+        text.color = if (open) Color.WHITE else 0x66E8D5A3.toInt()
+        drawFittedText(c, if (open) def.name else "???", x + bw / 2f, nameY, bw * 0.9f, nameSize)
         text.textSize = titleSize
         text.color = 0x88E8D5A3.toInt()
-        drawFittedText(c, def.title, x + bw / 2f, nameY + titleSize + 2f, bw * 0.92f, titleSize)
-        val unspent = prefs.charMarks(def.id)
+        drawFittedText(
+            c,
+            if (open) def.title else "закрыто",
+            x + bw / 2f,
+            nameY + titleSize + 2f,
+            bw * 0.92f,
+            titleSize,
+        )
+        val unspent = if (open) prefs.charMarks(def.id) else 0
         if (unspent > 0) {
             val badge = "${if (unspent > 99) "99+" else unspent.toString()}"
             text.textSize = (bh * 0.11f).coerceAtLeast(12f)
@@ -654,8 +698,10 @@ class GameView(
         val wld = world ?: return
         val w = c.width.toFloat()
         val h = c.height.toFloat()
-        val camX = wld.player.x
-        val camY = wld.player.y
+        val jx = if (wld.shake > 0.3f) sin(wld.time * 67f) * wld.shake * 0.18f else 0f
+        val jy = if (wld.shake > 0.3f) cos(wld.time * 53f) * wld.shake * 0.14f else 0f
+        val camX = wld.player.x + jx
+        val camY = wld.player.y + jy
         val scale = w / 420f
 
         fun sx(x: Float) = w / 2f + (x - camX) * scale
@@ -724,7 +770,11 @@ class GameView(
                     c.scale(-1f, 1f, ex, ey)
                 }
                 tmp.set(ex - size / 2f, ey - size / 2f, ex + size / 2f, ey + size / 2f)
+                if (e.flash > 0f) {
+                    spritePaint.colorFilter = PorterDuffColorFilter(0xCCFFE8C8.toInt(), PorterDuff.Mode.SRC_ATOP)
+                }
                 c.drawBitmap(bmp, null, tmp, spritePaint)
+                spritePaint.colorFilter = null
                 if (e.facing < 0f) c.restore()
             } else {
                 paint.color = 0xFF6A5040.toInt()
@@ -803,6 +853,11 @@ class GameView(
         if (wld.isDawn) {
             val t = ((wld.time - 420f) / 60f).coerceIn(0f, 1f)
             paint.color = Color.argb((40 + t * 70).toInt(), 255, 210, 140)
+            c.drawRect(0f, 0f, w, h, paint)
+            resetPaint()
+        }
+        if (wld.hurtFlash > 0f) {
+            paint.color = Color.argb((wld.hurtFlash * 90f).toInt().coerceIn(0, 110), 180, 20, 30)
             c.drawRect(0f, 0f, w, h, paint)
             resetPaint()
         }
@@ -1189,6 +1244,90 @@ class GameView(
         text.textAlign = Paint.Align.CENTER
     }
 
+    private fun drawChronicle(c: Canvas) {
+        drawBackdrop(c, true)
+        val w = c.width.toFloat()
+        val h = c.height.toFloat()
+        text.textAlign = Paint.Align.CENTER
+        text.color = 0xFFE8C98A.toInt()
+        text.textSize = w * 0.048f
+        c.drawText("Хроника", w / 2f, h * 0.055f, text)
+        text.textSize = w * 0.024f
+        text.color = 0x88E8D5A3.toInt()
+        val vk = prefs.factionKills(Faction.VAMPIRE)
+        val hk = prefs.factionKills(Faction.HOLY)
+        c.drawText("ночь $vk убийств · ${prefs.factionDawns(Faction.VAMPIRE)} зорь   ·   орден $hk · ${prefs.factionDawns(Faction.HOLY)}", w / 2f, h * 0.085f, text)
+
+        val top = h * 0.105f
+        val bot = h * 0.84f
+        val rowH = (bot - top) / 6f
+        Catalog.characters.forEachIndexed { i, def ->
+            drawChronicleRow(c, def, w * 0.055f, top + i * rowH, w * 0.89f, rowH - h * 0.008f)
+        }
+        drawButton(c, w * 0.2f, h * 0.86f, w * 0.6f, h * 0.07f, "Назад", 0xFF6A1824.toInt()) {
+            screen = Screen.TITLE
+        }
+    }
+
+    private fun drawChronicleRow(c: Canvas, def: CharacterDef, x: Float, y: Float, bw: Float, bh: Float) {
+        val open = Chronicle.isOpen(prefs, def.id)
+        val accent = if (def.faction == Faction.VAMPIRE) 0xFF8B1E2D.toInt() else 0xFFD4B06A.toInt()
+        paint.color = 0xCC120814.toInt()
+        tmp.set(x, y, x + bw, y + bh)
+        c.drawRoundRect(tmp, 14f, 14f, paint)
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 1.4f
+        paint.color = accent
+        c.drawRoundRect(tmp, 14f, 14f, paint)
+        paint.style = Paint.Style.FILL
+
+        val side = bh * 0.78f
+        val bmp = assets.characters[def.id]
+        if (bmp != null) {
+            tmp.set(x + 10f, y + (bh - side) / 2f, x + 10f + side, y + (bh + side) / 2f)
+            if (!open) spritePaint.alpha = 60
+            c.drawBitmap(bmp, null, tmp, spritePaint)
+            spritePaint.alpha = 255
+        }
+        text.textAlign = Paint.Align.LEFT
+        text.textSize = bh * 0.28f
+        text.color = if (open) Color.WHITE else 0x66E8D5A3.toInt()
+        c.drawText(if (open) def.name else "???", x + side + 22f, y + bh * 0.38f, text)
+        text.textSize = bh * 0.20f
+        text.color = 0x88E8D5A3.toInt()
+        val line = if (open) {
+            val sec = prefs.bestTime(def.id).toInt()
+            val clock = if (sec > 0) "%d:%02d".format(sec / 60, sec % 60) else "—"
+            "$clock   ·   ${prefs.bestKills(def.id)} убийств   ·   зорь: ${prefs.heroDawns(def.id)}"
+        } else {
+            Chronicle.hint(def.id)
+        }
+        drawFittedText(c, line, x + side + 22f, y + bh * 0.72f, bw - side - 36f, bh * 0.20f)
+        text.textAlign = Paint.Align.CENTER
+        pendingHits += Hit(x, y, x + bw, y + bh) {
+            selected = def
+            screen = Screen.SELECT
+        }
+    }
+
+    private fun syncMusic() {
+        val run = world
+        when (screen) {
+            Screen.TITLE, Screen.SELECT, Screen.META, Screen.CHRONICLE, Screen.SETTINGS -> {
+                music.vampire = selected.faction == Faction.VAMPIRE
+                music.bed = Music.Bed.MENU
+            }
+            Screen.PLAY, Screen.LEVELUP, Screen.CHEST, Screen.PAUSE -> {
+                music.vampire = run?.character?.faction == Faction.VAMPIRE
+                music.bed = if (run?.isDawn == true) Music.Bed.DAWN else Music.Bed.NIGHT
+            }
+            Screen.END -> {
+                music.vampire = run?.character?.faction == Faction.VAMPIRE
+                music.bed = if (run?.end == RunEnd.DAWN) Music.Bed.DAWN else Music.Bed.END
+            }
+        }
+    }
+
     private fun drawEnd(c: Canvas) {
         val wld = world ?: return
         dim(c)
@@ -1226,14 +1365,12 @@ class GameView(
         c.drawText(line, w / 2f, h * 0.57f, text)
         text.textSize = w * 0.026f
         text.color = 0x99E8C98A.toInt()
-        drawFittedText(
-            c,
-            Rites.whisper(wld.character.faction, wld.character.id, riteSnap),
-            w / 2f,
-            h * 0.62f,
-            w * 0.86f,
-            w * 0.026f,
-        )
+        val extra = if (lastUnlocks.isNotEmpty()) {
+            "В хронике: " + lastUnlocks.joinToString(", ") { Catalog.character(it).name }
+        } else {
+            Rites.whisper(wld.character.faction, wld.character.id, riteSnap)
+        }
+        drawFittedText(c, extra, w / 2f, h * 0.62f, w * 0.86f, w * 0.026f)
         drawButton(c, w * 0.18f, h * 0.68f, w * 0.64f, h * 0.075f, "Ещё раз", 0xFF6A1824.toInt()) {
             startRun(wld.character)
         }

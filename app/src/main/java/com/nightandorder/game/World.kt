@@ -33,6 +33,7 @@ class Enemy(
     var facing: Float = 1f,
     var role: Role = Role.MOB,
     var invuln: Boolean = false,
+    var flash: Float = 0f,
 )
 
 enum class Role { MOB, BOSS, SERVANT }
@@ -153,6 +154,8 @@ class World(
     var rite = startRite
     var brokenLeft = 0f
     var lookAways = 0
+    var shake = 0f
+    var hurtFlash = 0f
 
     val power: Power
         get() {
@@ -207,6 +210,8 @@ class World(
         ritualLeft = (ritualLeft - dt).coerceAtLeast(0f)
         brokenLeft = (brokenLeft - dt).coerceAtLeast(0f)
         hitSfxCd = (hitSfxCd - dt).coerceAtLeast(0f)
+        shake = (shake - dt * 38f).coerceAtLeast(0f)
+        hurtFlash = (hurtFlash - dt * 3.4f).coerceAtLeast(0f)
         if (time >= RUN_SECONDS) {
             end = RunEnd.DAWN
             return
@@ -665,6 +670,7 @@ class World(
             }
             if (dx != 0f) e.facing = if (dx > 0f) 1f else -1f
             e.touchCd = (e.touchCd - dt).coerceAtLeast(0f)
+            e.flash = (e.flash - dt).coerceAtLeast(0f)
         }
         val n = min(enemies.size, 36)
         for (i in 0 until n) {
@@ -702,7 +708,9 @@ class World(
                 player.invuln = 0.45f
                 e.touchCd = 0.35f
                 emit(Cue.HURT)
-                burst(player.x, player.y, 0xFFCC3344.toInt(), 10, 40f)
+                shake = 9f
+                hurtFlash = 1f
+                burst(player.x, player.y, 0xFFCC3344.toInt(), 14, 48f)
                 pushFloat(player.x, player.y - 12f, "-${taken.toInt()}", 0xFFFF6677.toInt())
                 if (player.hp <= 0f) {
                     player.hp = 0f
@@ -717,14 +725,24 @@ class World(
         if (e.hp <= 0f) return
         if (e.invuln) return
         e.hp -= amount
+        e.flash = 0.09f
+        val kx = e.x - player.x
+        val ky = e.y - player.y
+        val km = hypot(kx, ky).coerceAtLeast(1f)
+        val kick = if (e.role == Role.BOSS) 3f else 7f
+        e.x += kx / km * kick
+        e.y += ky / km * kick
+        shake = (shake + if (e.role == Role.BOSS) 3.2f else 1.1f).coerceAtMost(11f)
         pushFloat(e.x, e.y - 10f, amount.toInt().toString(), 0xFFFFE8A0.toInt())
         if (hitSfxCd <= 0f) {
             emit(Cue.HIT)
-            hitSfxCd = 0.06f
+            hitSfxCd = 0.05f
         }
         if (e.hp <= 0f) {
             e.hp = 0f
             kills += 1
+            emit(Cue.KILL)
+            shake = (shake + if (e.role == Role.BOSS) 6f else 2.4f).coerceAtMost(12f)
             if (e.role == Role.BOSS) {
                 pickups += Pickup(e.x, e.y, 40, GemKind.GREATER)
                 pickups += Pickup(e.x + 12f, e.y, 1, GemKind.VITAL)
@@ -732,7 +750,7 @@ class World(
             } else {
                 dropGem(e.x, e.y, e.xp)
             }
-            burst(e.x, e.y, 0xFFD0C8B0.toInt(), 6, 28f)
+            burst(e.x, e.y, 0xFFD0C8B0.toInt(), 12, 42f)
         }
     }
 

@@ -62,4 +62,41 @@ class Prefs(context: Context) {
             .apply()
         return true
     }
+
+    fun heroUnlocked(id: CharacterId): Boolean = p.getBoolean("u_${id.name}", false)
+
+    fun unlockHero(id: CharacterId) {
+        p.edit().putBoolean("u_${id.name}", true).apply()
+    }
+
+    fun bestTime(id: CharacterId): Float = p.getFloat("r_t_${id.name}", 0f)
+    fun bestKills(id: CharacterId): Int = p.getInt("r_k_${id.name}", 0)
+    fun bestLevel(id: CharacterId): Int = p.getInt("r_l_${id.name}", 0)
+    fun heroDawns(id: CharacterId): Int = p.getInt("r_d_${id.name}", 0)
+    fun heroRuns(id: CharacterId): Int = p.getInt("r_n_${id.name}", 0)
+    fun factionKills(faction: Faction): Int = p.getInt("fk_${faction.name}", 0)
+    fun factionDawns(faction: Faction): Int = p.getInt("fd_${faction.name}", 0)
+    fun factionRuns(faction: Faction): Int = p.getInt("fn_${faction.name}", 0)
+
+    fun addRun(
+        id: CharacterId,
+        faction: Faction,
+        time: Float,
+        kills: Int,
+        level: Int,
+        dawn: Boolean,
+    ) {
+        val e = p.edit()
+        if (time > bestTime(id)) e.putFloat("r_t_${id.name}", time)
+        if (kills > bestKills(id)) e.putInt("r_k_${id.name}", kills)
+        if (level > bestLevel(id)) e.putInt("r_l_${id.name}", level)
+        e.putInt("r_n_${id.name}", heroRuns(id) + 1)
+        e.putInt("fn_${faction.name}", factionRuns(faction) + 1)
+        e.putInt("fk_${faction.name}", factionKills(faction) + kills)
+        if (dawn) {
+            e.putInt("r_d_${id.name}", heroDawns(id) + 1)
+            e.putInt("fd_${faction.name}", factionDawns(faction) + 1)
+        }
+        e.apply()
+    }
 }
