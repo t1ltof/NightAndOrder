@@ -16,12 +16,13 @@ import android.view.MotionEvent
 import android.content.Intent
 import android.net.Uri
 import android.view.View
+import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.min
 import kotlin.math.sin
 
-enum class Screen { TITLE, SELECT, PLAY, LEVELUP, PAUSE, END, SETTINGS, CHEST }
+enum class Screen { TITLE, SELECT, META, PLAY, LEVELUP, PAUSE, END, SETTINGS, CHEST }
 
 class GameView(
     context: Context,
@@ -49,6 +50,10 @@ class GameView(
     private var sliderHeld = false
     private var world: World? = null
     private var selected: CharacterDef = Catalog.characters[0]
+    private var metaHeroTab = true
+    private var payoutDone = false
+    private var lastPayout = 0
+    private var riteSnap = Rites.sample(context)
 
     private var stickId = -1
     private var stickCx = 0f
@@ -94,6 +99,9 @@ class GameView(
     }
 
     fun onPauseGame() {
+        val inRun = world != null && world?.end == null &&
+            (screen == Screen.PLAY || screen == Screen.LEVELUP || screen == Screen.CHEST)
+        if (inRun) world?.lookAway()
         if (screen == Screen.PLAY) screen = Screen.PAUSE
         stopLoop()
     }
@@ -106,6 +114,10 @@ class GameView(
             }
             Screen.SETTINGS -> {
                 screen = settingsBack
+                true
+            }
+            Screen.META -> {
+                screen = Screen.SELECT
                 true
             }
             Screen.PAUSE, Screen.LEVELUP, Screen.CHEST -> true
@@ -155,8 +167,13 @@ class GameView(
             steps++
         }
         if (acc > STEP * 5f) acc = 0f
-        if (screen == Screen.PLAY && frameTimeNanos - lastBrightNs > 500_000_000L) {
+        if (frameTimeNanos - lastBrightNs > 500_000_000L) {
             brightness.refresh()
+            riteSnap = Rites.sample(context)
+            val run = world
+            if (run != null) {
+                run.rite = Rites.mods(run.character.faction, run.character.id, riteSnap)
+            }
             lastBrightNs = frameTimeNanos
         }
         invalidate()
@@ -189,7 +206,13 @@ class GameView(
             when {
                 w.pendingChest != null -> screen = Screen.CHEST
                 w.pendingOffers != null -> screen = Screen.LEVELUP
-                w.end != null -> screen = Screen.END
+                w.end != null -> {
+                    if (!payoutDone) {
+                        payoutDone = true
+                        lastPayout = Meta.award(prefs, w)
+                    }
+                    screen = Screen.END
+                }
             }
         }
     }
@@ -201,6 +224,7 @@ class GameView(
                 Cue.HURT -> sfx.vibe(40, 160)
                 Cue.LEVEL, Cue.CHEST -> sfx.vibe(30, 90)
                 Cue.BOSS, Cue.DAWN -> sfx.vibe(80, 200)
+                Cue.HUM_DARK -> sfx.vibe(50, 140)
                 else -> Unit
             }
         }
@@ -208,11 +232,15 @@ class GameView(
     }
 
     private fun startRun(def: CharacterDef) {
-        world = World(def)
+        riteSnap = Rites.sample(context)
+        val mods = Rites.mods(def.faction, def.id, riteSnap)
+        world = World(def, Meta.resolve(prefs, def), mods)
         world?.brightness = brightness.brightness
         stickId = -1
         stickX = 0f
         stickY = 0f
+        payoutDone = false
+        lastPayout = 0
         screen = Screen.PLAY
     }
 
@@ -229,12 +257,17 @@ class GameView(
                 if (screen == Screen.SETTINGS && y in h * 0.23f..h * 0.32f) {
                     sliderHeld = true
                     setVolumeFrom(x)
-                } else if (screen == Screen.PLAY && x < w * 0.62f && y > h * 0.45f) {
-                    stickId = id
-                    stickCx = x
-                    stickCy = y
-                    stickX = 0f
-                    stickY = 0f
+                } else if (screen == Screen.PLAY) {
+                    val onHud = liveHits.any { it.contains(x, y) }
+                    if (onHud) {
+                        onTap(x, y)
+                    } else {
+                        stickId = id
+                        stickCx = x
+                        stickCy = y
+                        stickX = 0f
+                        stickY = 0f
+                    }
                 } else {
                     onTap(x, y)
                 }
@@ -318,6 +351,7 @@ class GameView(
         when (screen) {
             Screen.TITLE -> drawTitle(c)
             Screen.SELECT -> drawSelect(c)
+            Screen.META -> drawMeta(c)
             Screen.SETTINGS -> {
                 drawBackdrop(c, true)
                 drawSettings(c)
@@ -518,15 +552,39 @@ class GameView(
         c.drawRoundRect(tmp, 18f, 18f, paint)
         text.color = 0xFFE8D5A3.toInt()
         text.textSize = w * 0.042f
-        c.drawText(selected.name, w / 2f, loreY + h * 0.04f, text)
-        text.textSize = w * 0.028f
+        c.drawText(selected.name, w / 2f, loreY + h * 0.035f, text)
+        text.textSize = w * 0.026f
         text.color = 0x88E8D5A3.toInt()
-        c.drawText(selected.title, w / 2f, loreY + h * 0.07f, text)
-        text.textSize = w * 0.032f
+        c.drawText(selected.title, w / 2f, loreY + h * 0.062f, text)
+        text.textSize = w * 0.028f
         text.color = Color.WHITE
-        drawFittedText(c, selected.lore, w / 2f, loreY + h * 0.12f, w * 0.84f, w * 0.032f)
+        drawFittedText(c, selected.lore, w / 2f, loreY + h * 0.10f, w * 0.84f, w * 0.028f)
+        text.textSize = w * 0.026f
+        text.color = 0xFFD4B06A.toInt()
+        val marks = prefs.charMarks(selected.id)
+        val fMarks = prefs.factionMarks(selected.faction)
+        c.drawText(
+            "${Meta.coin(selected.faction)} $marks   ·   ${Meta.factionTitle(selected.faction)} $fMarks",
+            w / 2f,
+            loreY + h * 0.132f,
+            text,
+        )
+        text.textSize = w * 0.024f
+        text.color = 0x88E8D5A3.toInt()
+        drawFittedText(
+            c,
+            Rites.whisper(selected.faction, selected.id, riteSnap),
+            w / 2f,
+            loreY + h * 0.158f,
+            w * 0.84f,
+            w * 0.024f,
+        )
 
-        drawButton(c, w * 0.18f, h * 0.84f, w * 0.64f, h * 0.075f, "Начать", 0xFF6A1824.toInt()) {
+        drawButton(c, w * 0.055f, h * 0.835f, w * 0.42f, h * 0.075f, "Наследие", 0xFF3A2018.toInt()) {
+            metaHeroTab = true
+            screen = Screen.META
+        }
+        drawButton(c, w * 0.525f, h * 0.835f, w * 0.42f, h * 0.075f, "Начать", 0xFF6A1824.toInt()) {
             startRun(selected)
         }
     }
@@ -566,6 +624,19 @@ class GameView(
         text.textSize = titleSize
         text.color = 0x88E8D5A3.toInt()
         drawFittedText(c, def.title, x + bw / 2f, nameY + titleSize + 2f, bw * 0.92f, titleSize)
+        val unspent = prefs.charMarks(def.id)
+        if (unspent > 0) {
+            val badge = "${if (unspent > 99) "99+" else unspent.toString()}"
+            text.textSize = (bh * 0.11f).coerceAtLeast(12f)
+            val tw = text.measureText(badge) + 14f
+            val th = text.textSize + 8f
+            paint.color = 0xEE6A1824.toInt()
+            tmp.set(x + bw - tw - 8f, y + 8f, x + bw - 8f, y + 8f + th)
+            c.drawRoundRect(tmp, 10f, 10f, paint)
+            text.textAlign = Paint.Align.CENTER
+            text.color = 0xFFE8C98A.toInt()
+            c.drawText(badge, tmp.centerX(), tmp.bottom - 6f, text)
+        }
         pendingHits += Hit(x, y, x + bw, y + bh) { selected = def }
     }
 
@@ -671,12 +742,23 @@ class GameView(
             val px = sx(pr.x)
             val py = sy(pr.y)
             if (px < -margin || py < -margin || px > w + margin || py > h + margin) continue
-            paint.color = when {
-                pr.holy -> 0xFFE8D48A.toInt()
-                pr.seek -> 0xFFC04088.toInt()
-                else -> 0xFFB02030.toInt()
+            val bmp = assets.bolts[pr.art]
+            val size = pr.radius * pr.art.sizeMul * scale
+            if (bmp != null) {
+                tmp.set(px - size / 2f, py - size / 2f, px + size / 2f, py + size / 2f)
+                if (pr.art.faces) {
+                    val deg = Math.toDegrees(atan2(pr.vy, pr.vx).toDouble()).toFloat()
+                    c.save()
+                    c.rotate(deg, px, py)
+                    c.drawBitmap(bmp, null, tmp, spritePaint)
+                    c.restore()
+                } else {
+                    c.drawBitmap(bmp, null, tmp, spritePaint)
+                }
+            } else {
+                paint.color = pr.art.fallback
+                c.drawCircle(px, py, pr.radius * scale, paint)
             }
-            c.drawCircle(px, py, pr.radius * scale, paint)
         }
         for (p in wld.particles) {
             val px = sx(p.x)
@@ -927,6 +1009,12 @@ class GameView(
         text.color = 0xFFE8C98A.toInt()
         text.textSize = w * 0.07f
         c.drawText("Пауза", w / 2f, h * 0.26f, text)
+        val run = world
+        if (run != null && run.lookAways > 0) {
+            text.textSize = w * 0.028f
+            text.color = 0x88C07080.toInt()
+            c.drawText("Что-то сдвинулось, пока вас не было.", w / 2f, h * 0.32f, text)
+        }
         drawButton(c, w * 0.2f, h * 0.36f, w * 0.6f, h * 0.075f, "Продолжить", 0xFF3A2018.toInt()) {
             screen = Screen.PLAY
         }
@@ -938,6 +1026,167 @@ class GameView(
             world = null
             screen = Screen.TITLE
         }
+    }
+
+    private fun drawMeta(c: Canvas) {
+        drawBackdrop(c, selected.faction == Faction.VAMPIRE)
+        val w = c.width.toFloat()
+        val h = c.height.toFloat()
+        val vampire = selected.faction == Faction.VAMPIRE
+        val accent = if (vampire) 0xFF8B1E2D.toInt() else 0xFFD4B06A.toInt()
+
+        text.textAlign = Paint.Align.CENTER
+        text.color = 0xFFE8C98A.toInt()
+        text.textSize = w * 0.042f
+        c.drawText(selected.name, w / 2f, h * 0.05f, text)
+        text.textSize = w * 0.026f
+        text.color = 0x88E8D5A3.toInt()
+        c.drawText("наследие", w / 2f, h * 0.078f, text)
+
+        val tabY = h * 0.095f
+        val tabH = h * 0.055f
+        drawTab(c, w * 0.055f, tabY, w * 0.44f, tabH, "Герой", metaHeroTab, accent) {
+            metaHeroTab = true
+        }
+        drawTab(c, w * 0.505f, tabY, w * 0.44f, tabH, Meta.factionTitle(selected.faction), !metaHeroTab, accent) {
+            metaHeroTab = false
+        }
+
+        val wallet = if (metaHeroTab) prefs.charMarks(selected.id) else prefs.factionMarks(selected.faction)
+        text.textAlign = Paint.Align.CENTER
+        text.textSize = w * 0.032f
+        text.color = 0xFFE8C98A.toInt()
+        val walletLabel = if (metaHeroTab) {
+            "${Meta.coin(selected.faction)}: $wallet"
+        } else {
+            "${Meta.factionTitle(selected.faction)}: $wallet  ·  на всех героев"
+        }
+        c.drawText(walletLabel, w / 2f, h * 0.175f, text)
+
+        val listTop = h * 0.195f
+        val listBot = h * 0.82f
+        val rowH = (listBot - listTop) / 5f
+        if (metaHeroTab) {
+            HeroPerk.entries.forEachIndexed { i, perk ->
+                val info = Meta.heroPerk(selected.id, perk)
+                val rank = prefs.heroRank(selected.id, perk)
+                drawPerkRow(
+                    c, w * 0.05f, listTop + i * rowH, w * 0.90f, rowH - h * 0.008f,
+                    info, rank, wallet, accent,
+                ) { prefs.tryBuyHero(selected.id, perk) }
+            }
+        } else {
+            FactionPerk.entries.forEachIndexed { i, perk ->
+                val info = Meta.factionPerk(selected.faction, perk)
+                val rank = prefs.factionRank(selected.faction, perk)
+                drawPerkRow(
+                    c, w * 0.05f, listTop + i * rowH, w * 0.90f, rowH - h * 0.008f,
+                    info, rank, wallet, accent,
+                ) { prefs.tryBuyFaction(selected.faction, perk) }
+            }
+        }
+
+        drawButton(c, w * 0.2f, h * 0.845f, w * 0.6f, h * 0.075f, "Назад", 0xFF6A1824.toInt()) {
+            screen = Screen.SELECT
+        }
+    }
+
+    private fun drawTab(
+        c: Canvas,
+        x: Float,
+        y: Float,
+        bw: Float,
+        bh: Float,
+        label: String,
+        on: Boolean,
+        accent: Int,
+        action: () -> Unit,
+    ) {
+        paint.color = if (on) 0xCC201018.toInt() else 0x66100814.toInt()
+        tmp.set(x, y, x + bw, y + bh)
+        c.drawRoundRect(tmp, 14f, 14f, paint)
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = if (on) 3f else 1.2f
+        paint.color = if (on) accent else 0x66E8C98A.toInt()
+        c.drawRoundRect(tmp, 14f, 14f, paint)
+        paint.style = Paint.Style.FILL
+        text.textAlign = Paint.Align.CENTER
+        text.textSize = bh * 0.42f
+        text.color = if (on) Color.WHITE else 0x88E8D5A3.toInt()
+        c.drawText(label, x + bw / 2f, y + bh * 0.66f, text)
+        pendingHits += Hit(x, y, x + bw, y + bh, action)
+    }
+
+    private fun drawPerkRow(
+        c: Canvas,
+        x: Float,
+        y: Float,
+        bw: Float,
+        bh: Float,
+        info: PerkInfo,
+        rank: Int,
+        wallet: Int,
+        accent: Int,
+        buy: () -> Boolean,
+    ) {
+        paint.color = 0xCC120814.toInt()
+        tmp.set(x, y, x + bw, y + bh)
+        c.drawRoundRect(tmp, 14f, 14f, paint)
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 1.4f
+        paint.color = 0x55E8C98A.toInt()
+        c.drawRoundRect(tmp, 14f, 14f, paint)
+        paint.style = Paint.Style.FILL
+
+        val pad = bw * 0.03f
+        val btnW = bw * 0.20f
+        val btnH = bh * 0.46f
+        val btnX = x + bw - pad - btnW
+        val btnY = y + (bh - btnH) / 2f
+        val maxed = rank >= Meta.MAX_RANK
+        val price = if (maxed) 0 else Meta.cost(rank)
+        val can = !maxed && wallet >= price
+
+        val textW = bw - btnW - pad * 3f
+        text.textAlign = Paint.Align.LEFT
+        text.textSize = bh * 0.22f
+        text.color = Color.WHITE
+        c.drawText(info.name, x + pad, y + bh * 0.28f, text)
+
+        text.textSize = (bh * 0.155f).coerceAtLeast(11f)
+        text.color = 0x99E8D5A3.toInt()
+        drawFittedText(c, info.blurb, x + pad, y + bh * 0.52f, textW, text.textSize)
+
+        val pipR = bh * 0.06f
+        val pipY = y + bh * 0.78f
+        var pipX = x + pad + pipR
+        for (i in 0 until Meta.MAX_RANK) {
+            paint.color = if (i < rank) accent else 0x33404040.toInt()
+            c.drawCircle(pipX, pipY, pipR, paint)
+            pipX += pipR * 2.6f
+        }
+
+        if (maxed) {
+            text.textAlign = Paint.Align.CENTER
+            text.textSize = btnH * 0.38f
+            text.color = 0x88E8C98A.toInt()
+            c.drawText("макс", btnX + btnW / 2f, btnY + btnH * 0.66f, text)
+        } else {
+            val btnColor = if (can) 0xFF6A1824.toInt() else 0xFF2A1818.toInt()
+            paint.color = btnColor
+            tmp.set(btnX, btnY, btnX + btnW, btnY + btnH)
+            c.drawRoundRect(tmp, 12f, 12f, paint)
+            text.textAlign = Paint.Align.CENTER
+            text.textSize = btnH * 0.36f
+            text.color = if (can) Color.WHITE else 0x66E8D5A3.toInt()
+            c.drawText("$price +", btnX + btnW / 2f, btnY + btnH * 0.66f, text)
+            if (can) {
+                pendingHits += Hit(btnX, btnY, btnX + btnW, btnY + btnH) {
+                    if (buy()) sfx.vibe(24, 80)
+                }
+            }
+        }
+        text.textAlign = Paint.Align.CENTER
     }
 
     private fun drawEnd(c: Canvas) {
@@ -961,19 +1210,34 @@ class GameView(
         text.color = Color.WHITE
         val sec = wld.time.toInt()
         c.drawText("${wld.character.name}  ·  ${"%d:%02d".format(sec / 60, sec % 60)}", w / 2f, h * 0.38f, text)
-        c.drawText("убийств: ${wld.kills}     уровень: ${wld.level}", w / 2f, h * 0.45f, text)
-        text.textSize = w * 0.032f
+        c.drawText("убийств: ${wld.kills}     уровень: ${wld.level}", w / 2f, h * 0.44f, text)
+        text.textSize = w * 0.034f
+        text.color = 0xFFE8C98A.toInt()
+        val coin = Meta.coin(wld.character.faction)
+        val branch = Meta.factionTitle(wld.character.faction)
+        c.drawText("+ $lastPayout $coin   ·   + $lastPayout $branch", w / 2f, h * 0.51f, text)
+        text.textSize = w * 0.028f
         text.color = 0x88E8D5A3.toInt()
         val line = if (wld.character.faction == Faction.VAMPIRE) {
             if (wld.power.rite > 0.45f) "Ночь была на вашей стороне." else "На свету вампиру тяжело."
         } else {
             if (wld.power.rite > 0.55f) "Свет держал вас до конца." else "Сегодня рассвета почти не было."
         }
-        c.drawText(line, w / 2f, h * 0.54f, text)
-        drawButton(c, w * 0.18f, h * 0.66f, w * 0.64f, h * 0.08f, "Ещё раз", 0xFF6A1824.toInt()) {
+        c.drawText(line, w / 2f, h * 0.57f, text)
+        text.textSize = w * 0.026f
+        text.color = 0x99E8C98A.toInt()
+        drawFittedText(
+            c,
+            Rites.whisper(wld.character.faction, wld.character.id, riteSnap),
+            w / 2f,
+            h * 0.62f,
+            w * 0.86f,
+            w * 0.026f,
+        )
+        drawButton(c, w * 0.18f, h * 0.68f, w * 0.64f, h * 0.075f, "Ещё раз", 0xFF6A1824.toInt()) {
             startRun(wld.character)
         }
-        drawButton(c, w * 0.18f, h * 0.78f, w * 0.64f, h * 0.08f, "К героям", 0xFF2A1018.toInt()) {
+        drawButton(c, w * 0.18f, h * 0.79f, w * 0.64f, h * 0.075f, "К героям", 0xFF2A1018.toInt()) {
             world = null
             screen = Screen.SELECT
         }

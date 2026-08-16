@@ -13,6 +13,7 @@ class Assets(context: Context) {
     val characterWalk = HashMap<CharacterId, SpriteClip>()
     val enemyWalk = HashMap<EnemyKind, SpriteClip>()
     val props = HashMap<PropKind, Bitmap>()
+    val bolts = HashMap<BoltArt, Bitmap>()
     var tile: Bitmap? = null
         private set
     var ground: Bitmap? = null
@@ -92,6 +93,10 @@ class Assets(context: Context) {
         enemyWalk[EnemyKind.FLAGELLANT] = clipOrStill("walk_flagellant.png", enemies.getValue(EnemyKind.FLAGELLANT), 80)
         enemyWalk[EnemyKind.KNIGHT] = clipOrStill("walk_knight.png", enemies.getValue(EnemyKind.KNIGHT), 96)
         enemyWalk[EnemyKind.BOSS] = clipOrStill("walk_boss.png", enemies.getValue(EnemyKind.BOSS), 160)
+
+        for (art in BoltArt.entries) {
+            bolts[art] = load(art.file, 64) ?: fallback(art.fallback, 48)
+        }
 
         props[PropKind.ROCK] = load("prop_rock.png", 96) ?: fallback(0xFF4A4A52.toInt(), 72)
         props[PropKind.STONE] = load("prop_stone.png", 72) ?: fallback(0xFF6A6A70.toInt(), 56)

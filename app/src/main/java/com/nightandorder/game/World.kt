@@ -49,6 +49,7 @@ class Projectile(
     var damage: Float,
     var pierce: Int,
     var holy: Boolean,
+    var art: BoltArt,
     var orbit: Boolean = false,
     var orbitAngle: Float = 0f,
     var orbitRadius: Float = 0f,
@@ -109,7 +110,11 @@ enum class BossPhase { GUARD, OPEN, RAGE }
 
 enum class RunEnd { DEAD, DAWN }
 
-class World(val character: CharacterDef) {
+class World(
+    val character: CharacterDef,
+    val meta: MetaMods = MetaMods(),
+    startRite: RiteMods = RiteMods(),
+) {
     val player = Player(character)
     val enemies = ArrayList<Enemy>(256)
     val projectiles = ArrayList<Projectile>(160)
@@ -125,7 +130,7 @@ class World(val character: CharacterDef) {
     var kills = 0
     var level = 1
     var xp = 0
-    var xpToNext = 6
+    var xpToNext = xpNeed(1)
     var brightness = 0.55f
     var spawnAcc = 0f
     var eliteAcc = 0f
@@ -145,28 +150,53 @@ class World(val character: CharacterDef) {
     var end: RunEnd? = null
     var inputX = 0f
     var inputY = 0f
+    var rite = startRite
+    var brokenLeft = 0f
+    var lookAways = 0
 
-    val power get() = BrightnessPower.of(character.faction, brightness)
+    val power: Power
+        get() {
+            val shifted = if (character.faction == Faction.VAMPIRE) {
+                (brightness - meta.brightShift).coerceIn(0f, 1f)
+            } else {
+                (brightness + meta.brightShift).coerceIn(0f, 1f)
+            }
+            return BrightnessPower.of(character.faction, shifted)
+        }
     val isDawn get() = time >= 420f
 
     init {
-        weapons += WeaponInst(character.signature, 1)
+        player.maxHp = character.hp * meta.hpMul * rite.hpMul
+        player.hp = player.maxHp
+        weapons += WeaponInst(character.signature, meta.startSigLevel.coerceIn(1, 8))
     }
 
     fun damageMul(): Float {
-        var m = power.damage * (1f + passives.lv(PassiveId.DAMAGE) * 0.18f) * curseMul
+        var m = power.damage * (1f + passives.lv(PassiveId.DAMAGE) * 0.18f) * curseMul * meta.dmgMul * rite.dmgMul
         if (ritualLeft > 0f) m *= 1.12f
         if (isDawn && character.faction == Faction.HOLY) m *= 1.22f
+        if (brokenLeft > 0f) m *= 0.86f
         return m
     }
-    fun cooldownMul() = (1f / power.ability) * (1f - passives.lv(PassiveId.COOLDOWN) * 0.08f).coerceAtLeast(0.45f)
-    fun areaMul() = (0.85f + power.ability * 0.25f) * (1f + passives.lv(PassiveId.AREA) * 0.12f)
+    fun cooldownMul() = (1f / power.ability) * (1f - passives.lv(PassiveId.COOLDOWN) * 0.08f).coerceAtLeast(0.45f) * meta.cdMul * rite.cdMul
+    fun areaMul() = (0.85f + power.ability * 0.25f) * (1f + passives.lv(PassiveId.AREA) * 0.12f) * meta.areaMul * rite.areaMul
     fun extraShots() = passives.lv(PassiveId.PROJECTILES)
-    fun magnet() = 52f + passives.lv(PassiveId.MAGNET) * 70f + if (ritualLeft > 0f) 90f else 0f
+    fun magnet() = 52f + passives.lv(PassiveId.MAGNET) * 70f + meta.magnetAdd + rite.magnetAdd +
+        (if (ritualLeft > 0f) 90f else 0f) + (if (brokenLeft > 0f) -36f else 0f)
     fun magnetPull() = 200f + passives.lv(PassiveId.MAGNET) * 140f
-    fun armor() = passives.lv(PassiveId.ARMOR) * 0.08f
-    fun moveSpeed() = character.speed * (1f + passives.lv(PassiveId.SPEED) * 0.08f) *
+    fun armor() = (passives.lv(PassiveId.ARMOR) * 0.08f + meta.armorAdd + rite.armorAdd).coerceIn(0f, 0.72f)
+    fun moveSpeed() = character.speed * (1f + passives.lv(PassiveId.SPEED) * 0.08f) * meta.spdMul * rite.spdMul *
         if (ritualLeft > 0f) 1.22f else 1f
+
+    fun lookAway() {
+        if (end != null) return
+        lookAways += 1
+        val skip = (26f + lookAways * 6f).coerceAtMost(50f)
+        time = (time + skip).coerceAtMost(RUN_SECONDS - 5f)
+        brokenLeft = 18f + lookAways * 5f
+        emit(Cue.HUM_DARK)
+        pushFloat(player.x, player.y - 22f, "взгляд сорвался", 0xFFC07080.toInt())
+    }
 
     fun emit(c: Cue) { events += c }
 
@@ -175,6 +205,7 @@ class World(val character: CharacterDef) {
         if (end != null || pendingOffers != null || pendingChest != null) return
         time += dt
         ritualLeft = (ritualLeft - dt).coerceAtLeast(0f)
+        brokenLeft = (brokenLeft - dt).coerceAtLeast(0f)
         hitSfxCd = (hitSfxCd - dt).coerceAtLeast(0f)
         if (time >= RUN_SECONDS) {
             end = RunEnd.DAWN
@@ -233,6 +264,7 @@ class World(val character: CharacterDef) {
                             damage = (7f + w.level * 2.2f) * dmg,
                             pierce = 99,
                             holy = false,
+                            art = BoltArt.ORB,
                             orbit = true,
                             orbitAngle = ang,
                             orbitRadius = 46f + w.level * 6f,
@@ -248,7 +280,7 @@ class World(val character: CharacterDef) {
                         repeat(n) { i ->
                             val t = nearest(p.x, p.y, skip = i) ?: return@repeat
                             val a = atan2(t.y - p.y, t.x - p.x) + (i - n / 2f) * 0.12f
-                            shoot(p.x, p.y, a, 260f, (9f + w.level * 2.4f) * dmg, 0.7f, 6f * area, 1, false)
+                            shoot(p.x, p.y, a, 260f, (9f + w.level * 2.4f) * dmg, 0.7f, 6f * area, 1, false, BoltArt.FANG)
                         }
                     }
                 }
@@ -266,7 +298,7 @@ class World(val character: CharacterDef) {
                         val n = 4 + w.level / 2 + shots
                         repeat(n) { i ->
                             val a = i * (Math.PI.toFloat() * 2f / n) + time
-                            shoot(p.x, p.y, a, 180f, (6f + w.level * 1.6f) * dmg, 0.85f, 7f * area, 0, false)
+                            shoot(p.x, p.y, a, 180f, (6f + w.level * 1.6f) * dmg, 0.85f, 7f * area, 0, false, BoltArt.BAT)
                         }
                     }
                 }
@@ -277,7 +309,7 @@ class World(val character: CharacterDef) {
                         val n = 4 + (if (w.level >= 5) 4 else 0) + shots
                         repeat(n) { i ->
                             val a = i * (Math.PI.toFloat() * 2f / n) + time * 0.4f
-                            shoot(p.x, p.y, a, 220f, (8f + w.level * 2.1f) * dmg, 0.9f, 7f * area, 1, true)
+                            shoot(p.x, p.y, a, 220f, (8f + w.level * 2.1f) * dmg, 0.9f, 7f * area, 1, true, BoltArt.CROSS)
                         }
                     }
                 }
@@ -289,7 +321,7 @@ class World(val character: CharacterDef) {
                         repeat(n) { i ->
                             val t = nearest(p.x, p.y, skip = i) ?: return@repeat
                             val a = atan2(t.y - p.y, t.x - p.x)
-                            shoot(p.x, p.y, a, 300f, (10f + w.level * 2.6f) * dmg, 0.8f, 6f * area, 2, true)
+                            shoot(p.x, p.y, a, 300f, (10f + w.level * 2.6f) * dmg, 0.8f, 6f * area, 2, true, BoltArt.SPEAR)
                         }
                     }
                 }
@@ -313,7 +345,7 @@ class World(val character: CharacterDef) {
                         val n = 8 + w.level + shots
                         repeat(n) { i ->
                             val a = i * (Math.PI.toFloat() * 2f / n)
-                            shoot(p.x, p.y, a, 200f, (7f + w.level * 1.8f) * dmg, 0.75f, 6.5f * area, 0, true)
+                            shoot(p.x, p.y, a, 200f, (7f + w.level * 1.8f) * dmg, 0.75f, 6.5f * area, 0, true, BoltArt.CROSS)
                         }
                     }
                 }
@@ -332,8 +364,9 @@ class World(val character: CharacterDef) {
                                 damage = (11f + w.level * 3.1f) * dmg,
                                 pierce = 1,
                                 holy = false,
+                                art = BoltArt.HEX,
                                 seek = true,
-                                seekTurn = 7.5f,
+                                seekTurn = 7.5f * rite.seekMul,
                                 explode = true,
                                 explodeRadius = (28f + w.level * 4f) * area,
                             )
@@ -361,7 +394,7 @@ class World(val character: CharacterDef) {
                         repeat(n) { i ->
                             val t = nearest(p.x, p.y, skip = i) ?: return@repeat
                             val a = atan2(t.y - p.y, t.x - p.x) + (i - n / 2f) * 0.1f
-                            shoot(p.x, p.y, a, 280f, (11f + w.level * 2.8f) * dmg, 0.65f, 6f * area, 1, false)
+                            shoot(p.x, p.y, a, 280f, (11f + w.level * 2.8f) * dmg, 0.65f, 6f * area, 1, false, BoltArt.FANG)
                         }
                     }
                 }
@@ -376,7 +409,7 @@ class World(val character: CharacterDef) {
                     if (have < want) {
                         projectiles += Projectile(
                             p.x, p.y, 0f, 0f, 999f, 10f * area,
-                            (9f + w.level * 2.4f) * dmg, 99, false,
+                            (9f + w.level * 2.4f) * dmg, 99, false, BoltArt.ORB,
                             orbit = true, orbitRadius = 50f + w.level * 5f, orbitSpeed = 2.4f,
                         )
                     }
@@ -392,7 +425,8 @@ class World(val character: CharacterDef) {
                             projectiles += Projectile(
                                 p.x, p.y, cos(a) * 190f, sin(a) * 190f,
                                 1.2f, 8f * area, (13f + w.level * 3.2f) * dmg, 1, false,
-                                seek = true, seekTurn = 9f, explode = true,
+                                BoltArt.HEX,
+                                seek = true, seekTurn = 9f * rite.seekMul, explode = true,
                                 explodeRadius = (32f + w.level * 5f) * area,
                             )
                         }
@@ -405,7 +439,7 @@ class World(val character: CharacterDef) {
                         val n = 8 + w.level + shots
                         repeat(n) { i ->
                             val a = i * (Math.PI.toFloat() * 2f / n) + time
-                            shoot(p.x, p.y, a, 240f, (9f + w.level * 2.2f) * dmg, 0.85f, 7f * area, 1, true)
+                            shoot(p.x, p.y, a, 240f, (9f + w.level * 2.2f) * dmg, 0.85f, 7f * area, 1, true, BoltArt.CROSS)
                         }
                     }
                 }
@@ -417,7 +451,7 @@ class World(val character: CharacterDef) {
                         repeat(n) { i ->
                             val t = nearest(p.x, p.y, skip = i) ?: return@repeat
                             val a = atan2(t.y - p.y, t.x - p.x)
-                            shoot(p.x, p.y, a, 320f, (12f + w.level * 3f) * dmg, 0.8f, 6f * area, 2, true)
+                            shoot(p.x, p.y, a, 320f, (12f + w.level * 3f) * dmg, 0.8f, 6f * area, 2, true, BoltArt.SPEAR)
                             nova(t.x, t.y, (28f + w.level * 4f) * area, (10f + w.level * 2.4f) * dmg, true)
                         }
                     }
@@ -454,10 +488,11 @@ class World(val character: CharacterDef) {
     private fun shoot(
         x: Float, y: Float, a: Float, speed: Float,
         damage: Float, life: Float, radius: Float, pierce: Int, holy: Boolean,
+        art: BoltArt,
     ) {
         projectiles += Projectile(
             x, y, cos(a) * speed, sin(a) * speed,
-            life, radius, damage, pierce, holy,
+            life, radius, damage, pierce, holy, art,
         )
     }
 
@@ -533,7 +568,7 @@ class World(val character: CharacterDef) {
             time > 120f -> 45
             else -> 32
         }
-        val rate = 1.1f + time / 90f
+        val rate = (1.1f + time / 90f) * rite.spawnMul
         spawnAcc += dt * rate
         while (spawnAcc >= 1f && enemies.size < cap) {
             spawnAcc -= 1f
@@ -562,6 +597,7 @@ class World(val character: CharacterDef) {
     }
 
     private fun rollKind(): EnemyKind {
+        if (rng.nextFloat() < rite.batBias.coerceAtLeast(0f)) return EnemyKind.BAT
         val t = time
         val r = rng.nextFloat()
         return when {
@@ -619,8 +655,9 @@ class World(val character: CharacterDef) {
             val dx = px - e.x
             val dy = py - e.y
             val m = hypot(dx, dy).coerceAtLeast(0.001f)
-            e.x += dx / m * e.speed * dt
-            e.y += dy / m * e.speed * dt
+            val step = e.speed * rite.enemySpdMul
+            e.x += dx / m * step * dt
+            e.y += dy / m * step * dt
             if (e.kind != EnemyKind.BAT) {
                 val ep = Field.pushOut(e.x, e.y, e.radius)
                 e.x = ep.first
@@ -749,11 +786,12 @@ class World(val character: CharacterDef) {
     }
 
     private fun addXp(v: Int) {
-        xp += v
+        if (v <= 0) return
+        xp += max(1, (v * meta.xpMul).toInt())
         while (xp >= xpToNext && pendingOffers == null) {
             xp -= xpToNext
             level += 1
-            xpToNext = (6 + level * 4 + (level * level) / 6).coerceAtMost(80)
+            xpToNext = xpNeed(level)
             pendingOffers = rollOffers()
             emit(Cue.LEVEL)
         }
@@ -911,7 +949,7 @@ class World(val character: CharacterDef) {
             emit(Cue.DAWN)
         }
         if (character.faction == Faction.VAMPIRE && brightness > 0.22f) {
-            val burn = (3.5f + 14f * brightness) * dt
+            val burn = (3.5f + 14f * brightness) * dt * rite.burnMul * if (brokenLeft > 0f) 1.2f else 1f
             player.hp -= burn
             if (player.hp <= 0f) {
                 player.hp = 0f
@@ -1023,5 +1061,7 @@ class World(val character: CharacterDef) {
 
     companion object {
         const val RUN_SECONDS = 480f
+
+        fun xpNeed(lv: Int): Int = 8 + lv * 5 + (lv * lv) / 2
     }
 }

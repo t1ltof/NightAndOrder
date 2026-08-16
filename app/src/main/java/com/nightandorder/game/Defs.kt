@@ -11,6 +11,42 @@ enum class WeaponId {
 
 enum class EnemyKind { THRALL, BAT, FLAGELLANT, KNIGHT, BOSS }
 
+enum class BoltArt {
+    FANG, BAT, ORB, SPEAR, HEX, CROSS;
+
+    val file: String
+        get() = when (this) {
+            FANG -> "bolt_fang.png"
+            BAT -> "bolt_bat.png"
+            ORB -> "bolt_orb.png"
+            SPEAR -> "bolt_spear.png"
+            HEX -> "bolt_hex.png"
+            CROSS -> "bolt_cross.png"
+        }
+
+    val faces: Boolean
+        get() = this != ORB
+
+    val fallback: Int
+        get() = when (this) {
+            FANG -> 0xFFE8E0D0.toInt()
+            BAT -> 0xFF8B2030.toInt()
+            ORB -> 0xFFB02030.toInt()
+            SPEAR -> 0xFFE8D48A.toInt()
+            HEX -> 0xFFC04088.toInt()
+            CROSS -> 0xFFE8D48A.toInt()
+        }
+
+    val sizeMul: Float
+        get() = when (this) {
+            BAT -> 3.8f
+            SPEAR, FANG -> 3.5f
+            CROSS -> 3.3f
+            HEX -> 3.1f
+            ORB -> 2.8f
+        }
+}
+
 enum class OfferKind { WEAPON, PASSIVE }
 
 enum class PassiveId { HP, SPEED, DAMAGE, COOLDOWN, AREA, MAGNET, ARMOR, PROJECTILES }
