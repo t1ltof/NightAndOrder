@@ -9,6 +9,7 @@ import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffColorFilter
+import android.graphics.RadialGradient
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
@@ -54,6 +55,10 @@ class GameView(
     private var world: World? = null
     private var selected: CharacterDef = Catalog.characters.first { Chronicle.isOpen(prefs, it.id) }
     private var metaHeroTab = true
+    private var metaPage = 0
+    private var vignette: Bitmap? = null
+    private var vignetteW = 0
+    private var vignetteH = 0
     private var payoutDone = false
     private var lastPayout = 0
     private var lastUnlocks: List<CharacterId> = emptyList()
@@ -416,7 +421,7 @@ class GameView(
         val w = c.width
         val h = c.height
         val cache = cachedBg
-        if (cache == null || cachedBgW != w || cachedBgH != h) {
+        if (cache == null || cachedBgW != w || cachedBgH != h || cachedBgVampire != vampireTint) {
             cache?.recycle()
             val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.RGB_565)
             val cc = Canvas(bmp)
@@ -433,8 +438,14 @@ class GameView(
             } else {
                 cc.drawColor(0xFF140810.toInt())
             }
-            paint.color = 0x66080A10.toInt()
+            paint.color = if (vampireTint) 0x77201018.toInt() else 0x66101820.toInt()
             cc.drawRect(0f, 0f, w.toFloat(), h.toFloat(), paint)
+            paint.shader = RadialGradient(
+                w / 2f, h * 0.42f, maxOf(w, h) * 0.72f,
+                0x00000000, 0xCC050308.toInt(), Shader.TileMode.CLAMP,
+            )
+            cc.drawRect(0f, 0f, w.toFloat(), h.toFloat(), paint)
+            paint.shader = null
             cachedBg = bmp
             cachedBgW = w
             cachedBgH = h
@@ -452,14 +463,27 @@ class GameView(
         text.textAlign = Paint.Align.CENTER
         text.color = 0xFFE8C98A.toInt()
         text.textSize = w * 0.11f
+        paint.color = 0x55E8C98A.toInt()
+        paint.strokeWidth = 1.4f
+        paint.style = Paint.Style.STROKE
+        c.drawLine(w * 0.22f, h * 0.215f, w * 0.78f, h * 0.215f, paint)
+        c.drawLine(w * 0.28f, h * 0.50f, w * 0.72f, h * 0.50f, paint)
+        paint.style = Paint.Style.FILL
         text.textSize = w * 0.10f
+        text.color = 0x22E8C98A.toInt()
+        c.drawText("NIGHT", w / 2f + 3f, h * 0.28f + 4f, text)
+        text.color = 0xFFE8C98A.toInt()
         c.drawText("NIGHT", w / 2f, h * 0.28f, text)
         text.textSize = w * 0.048f
         text.color = 0xFF8B1E2D.toInt()
         c.drawText("AND", w / 2f, h * 0.35f, text)
         text.textSize = w * 0.10f
+        text.color = 0x22E8C98A.toInt()
+        c.drawText("MIGHT", w / 2f + 3f, h * 0.46f + 4f, text)
         text.color = 0xFFE8C98A.toInt()
         c.drawText("MIGHT", w / 2f, h * 0.46f, text)
+        resetPaint()
+        drawMotes(c, w, h, titlePulse, 0x66E8C98A.toInt())
         text.textSize = w * 0.038f
         text.color = 0x88E8D5A3.toInt()
         c.drawText("вампиры и Святой орден", w / 2f, h * 0.52f, text)
@@ -571,6 +595,7 @@ class GameView(
         text.textAlign = Paint.Align.CENTER
         text.textSize = w * 0.046f
         text.color = 0xFFE8C98A.toInt()
+        drawMotes(c, w, h, titlePulse * 0.7f, 0x33E8C98A.toInt())
         if (dailyPick) {
             c.drawText("Ночь ${Night.dateLabel()}", w / 2f, h * 0.055f, text)
         } else {
@@ -779,6 +804,8 @@ class GameView(
                 GemKind.VITAL -> 0xAAFFB0B8.toInt()
             }
             val r = (if (g.kind == GemKind.SOUL) 5f else 7.2f) * scale * pulse
+            paint.color = (outer and 0x00FFFFFF) or 0x33000000
+            c.drawCircle(gx, gy, r * 1.85f, paint)
             paint.color = outer
             c.drawCircle(gx, gy, r, paint)
             paint.color = inner
@@ -795,6 +822,9 @@ class GameView(
                 clip?.at(wld.time) ?: assets.enemies[e.kind]
             }
             val size = e.radius * 2.4f * scale
+            paint.color = 0x55000000.toInt()
+            tmp.set(ex - size * 0.32f, ey + size * 0.28f, ex + size * 0.32f, ey + size * 0.42f)
+            c.drawOval(tmp, paint)
             if (bmp != null) {
                 if (e.facing < 0f) {
                     c.save()
@@ -825,6 +855,13 @@ class GameView(
             if (px < -margin || py < -margin || px > w + margin || py > h + margin) continue
             val bmp = assets.bolts[pr.art]
             val size = pr.radius * pr.art.sizeMul * scale
+            val spd = hypot(pr.vx, pr.vy)
+            if (spd > 20f && !pr.orbit) {
+                paint.color = (pr.art.fallback and 0x00FFFFFF) or 0x44000000
+                val tx = px - pr.vx / spd * size * 0.7f
+                val ty = py - pr.vy / spd * size * 0.7f
+                c.drawCircle(tx, ty, size * 0.22f, paint)
+            }
             if (bmp != null) {
                 tmp.set(px - size / 2f, py - size / 2f, px + size / 2f, py + size / 2f)
                 if (pr.art.faces) {
@@ -871,6 +908,13 @@ class GameView(
                 val py = sy(p.y)
                 val bob = Motion.walkBob(wld.time, moving)
                 val squash = Motion.walkSquash(wld.time, moving)
+                paint.color = 0x66000000.toInt()
+                tmp.set(px - size * 0.28f, py + size * 0.26f, px + size * 0.28f, py + size * 0.40f)
+                c.drawOval(tmp, paint)
+                if (wld.furyLeft > 0f) {
+                    paint.color = 0x33E05040.toInt()
+                    c.drawCircle(px, py, size * 0.55f, paint)
+                }
                 c.save()
                 if (p.facing < 0f) {
                     c.scale(-1f, 1f, px, py)
@@ -882,6 +926,13 @@ class GameView(
                 c.restore()
             }
         }
+
+        drawMotes(
+            c, w, h, wld.time,
+            if (wld.biome == Biome.CHAPEL) 0x44E8D48A.toInt() else 0x338B1E2D.toInt(),
+        )
+        ensureVignette(c.width, c.height)
+        vignette?.let { c.drawBitmap(it, 0f, 0f, null) }
 
         if (wld.isDawn) {
             val t = ((wld.time - 420f) / 60f).coerceIn(0f, 1f)
@@ -944,25 +995,37 @@ class GameView(
     private fun drawHud(c: Canvas, wld: World) {
         val w = c.width.toFloat()
         val h = c.height.toFloat()
-        paint.color = 0x88000000.toInt()
-        c.drawRect(0f, 0f, w, h * 0.105f, paint)
+        paint.shader = LinearGradient(
+            0f, 0f, 0f, h * 0.12f,
+            0xDD07050A.toInt(), 0x0007050A, Shader.TileMode.CLAMP,
+        )
+        c.drawRect(0f, 0f, w, h * 0.12f, paint)
+        paint.shader = null
 
         val barRight = w * 0.62f
         val hp = (wld.player.hp / wld.player.maxHp).coerceIn(0f, 1f)
-        paint.color = 0xFF2A1014.toInt()
+        paint.color = 0xFF1A080C.toInt()
         tmp.set(w * 0.03f, h * 0.016f, barRight, h * 0.040f)
         c.drawRoundRect(tmp, 8f, 8f, paint)
-        paint.color = 0xFFA02030.toInt()
+        paint.shader = LinearGradient(
+            tmp.left, 0f, tmp.left + (barRight - w * 0.03f) * hp, 0f,
+            0xFF6A1020.toInt(), 0xFFE04050.toInt(), Shader.TileMode.CLAMP,
+        )
         tmp.right = tmp.left + (barRight - tmp.left) * hp
         c.drawRoundRect(tmp, 8f, 8f, paint)
+        paint.shader = null
 
         val xp = (wld.xp.toFloat() / wld.xpToNext).coerceIn(0f, 1f)
-        paint.color = 0xFF102028.toInt()
+        paint.color = 0xFF0C141C.toInt()
         tmp.set(w * 0.03f, h * 0.048f, barRight, h * 0.068f)
         c.drawRoundRect(tmp, 8f, 8f, paint)
-        paint.color = 0xFF6EC0E8.toInt()
+        paint.shader = LinearGradient(
+            tmp.left, 0f, tmp.left + (barRight - w * 0.03f) * xp, 0f,
+            0xFF1A4060.toInt(), 0xFF8ED8F0.toInt(), Shader.TileMode.CLAMP,
+        )
         tmp.right = tmp.left + (barRight - tmp.left) * xp
         c.drawRoundRect(tmp, 8f, 8f, paint)
+        paint.shader = null
 
         val rite = wld.power.rite
         val cx = w * 0.68f
@@ -992,10 +1055,18 @@ class GameView(
         }
         val ban = wld.banner
         if (ban != null && wld.bannerLeft > 0f) {
+            paint.color = 0xCC140810.toInt()
+            tmp.set(w * 0.12f, h * 0.112f, w * 0.88f, h * 0.162f)
+            c.drawRoundRect(tmp, 12f, 12f, paint)
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = 1.6f
+            paint.color = 0xAAE8C98A.toInt()
+            c.drawRoundRect(tmp, 12f, 12f, paint)
+            paint.style = Paint.Style.FILL
             text.textAlign = Paint.Align.CENTER
-            text.textSize = w * 0.034f
-            text.color = 0xE8E8C98A.toInt()
-            c.drawText(ban, w / 2f, h * 0.14f, text)
+            text.textSize = w * 0.032f
+            text.color = 0xFFE8C98A.toInt()
+            c.drawText(ban, w / 2f, h * 0.148f, text)
         }
     }
 
@@ -1155,9 +1226,11 @@ class GameView(
         val tabH = h * 0.055f
         drawTab(c, w * 0.055f, tabY, w * 0.44f, tabH, "Герой", metaHeroTab, accent) {
             metaHeroTab = true
+            metaPage = 0
         }
         drawTab(c, w * 0.505f, tabY, w * 0.44f, tabH, Meta.factionTitle(selected.faction), !metaHeroTab, accent) {
             metaHeroTab = false
+            metaPage = 0
         }
 
         val wallet = if (metaHeroTab) prefs.charMarks(selected.id) else prefs.factionMarks(selected.faction)
@@ -1169,13 +1242,23 @@ class GameView(
         } else {
             "${Meta.factionTitle(selected.faction)}: $wallet  ·  на всех героев"
         }
-        c.drawText(walletLabel, w / 2f, h * 0.175f, text)
+        c.drawText(walletLabel, w / 2f, h * 0.168f, text)
 
-        val listTop = h * 0.195f
+        val heroPages = listOf(HeroPerk.entries.take(5), HeroPerk.entries.drop(5))
+        val factPages = listOf(FactionPerk.entries.take(5), FactionPerk.entries.drop(5))
+        val pages = if (metaHeroTab) heroPages.size else factPages.size
+        if (metaPage >= pages) metaPage = pages - 1
+        drawTab(c, w * 0.28f, h * 0.178f, w * 0.20f, h * 0.036f, "I", metaPage == 0, accent) { metaPage = 0 }
+        drawTab(c, w * 0.52f, h * 0.178f, w * 0.20f, h * 0.036f, "II", metaPage == 1, accent) {
+            if (pages > 1) metaPage = 1
+        }
+
+        val listTop = h * 0.222f
         val listBot = h * 0.82f
-        val rowH = (listBot - listTop) / 5f
         if (metaHeroTab) {
-            HeroPerk.entries.forEachIndexed { i, perk ->
+            val slice = heroPages[metaPage.coerceIn(0, heroPages.lastIndex)]
+            val rowH = (listBot - listTop) / slice.size.coerceAtLeast(1)
+            slice.forEachIndexed { i, perk ->
                 val info = Meta.heroPerk(selected.id, perk)
                 val rank = prefs.heroRank(selected.id, perk)
                 drawPerkRow(
@@ -1184,7 +1267,9 @@ class GameView(
                 ) { prefs.tryBuyHero(selected.id, perk) }
             }
         } else {
-            FactionPerk.entries.forEachIndexed { i, perk ->
+            val slice = factPages[metaPage.coerceIn(0, factPages.lastIndex)]
+            val rowH = (listBot - listTop) / slice.size.coerceAtLeast(1)
+            slice.forEachIndexed { i, perk ->
                 val info = Meta.factionPerk(selected.faction, perk)
                 val rank = prefs.factionRank(selected.faction, perk)
                 drawPerkRow(
@@ -1502,11 +1587,15 @@ class GameView(
         color: Int,
         action: () -> Unit,
     ) {
-        paint.color = color
         tmp.set(x, y, x + bw, y + bh)
+        paint.shader = LinearGradient(
+            x, y, x, y + bh,
+            lighten(color, 0.18f), color, Shader.TileMode.CLAMP,
+        )
         c.drawRoundRect(tmp, 16f, 16f, paint)
+        paint.shader = null
         paint.style = Paint.Style.STROKE
-        paint.color = 0x88E8C98A.toInt()
+        paint.color = 0x99E8C98A.toInt()
         paint.strokeWidth = 2f
         c.drawRoundRect(tmp, 16f, 16f, paint)
         paint.style = Paint.Style.FILL
@@ -1515,6 +1604,42 @@ class GameView(
         text.textSize = bh * 0.42f
         c.drawText(label, x + bw / 2f, y + bh * 0.66f, text)
         pendingHits += Hit(x, y, x + bw, y + bh, action)
+    }
+
+    private fun lighten(color: Int, amount: Float): Int {
+        val a = color ushr 24
+        val r = ((color shr 16) and 0xFF)
+        val g = ((color shr 8) and 0xFF)
+        val b = color and 0xFF
+        fun ch(v: Int) = (v + ((255 - v) * amount)).toInt().coerceIn(0, 255)
+        return (a shl 24) or (ch(r) shl 16) or (ch(g) shl 8) or ch(b)
+    }
+
+    private fun drawMotes(c: Canvas, w: Float, h: Float, t: Float, color: Int) {
+        paint.color = color
+        for (i in 0 until 14) {
+            val px = ((sin(t * 0.17f + i * 1.7f) * 0.46f + 0.5f) * w)
+            val py = ((cos(t * 0.13f + i * 2.1f) * 0.40f + 0.48f) * h)
+            val r = 1.6f + (i % 4) * 0.7f
+            c.drawCircle(px, py, r, paint)
+        }
+    }
+
+    private fun ensureVignette(w: Int, h: Int) {
+        if (vignette != null && vignetteW == w && vignetteH == h) return
+        vignette?.recycle()
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val cc = Canvas(bmp)
+        val g = RadialGradient(
+            w / 2f, h / 2f, maxOf(w, h) * 0.62f,
+            0x00000000, 0xAA050308.toInt(), Shader.TileMode.CLAMP,
+        )
+        val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        p.shader = g
+        cc.drawRect(0f, 0f, w.toFloat(), h.toFloat(), p)
+        vignette = bmp
+        vignetteW = w
+        vignetteH = h
     }
 
     private class Hit(

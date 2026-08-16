@@ -168,6 +168,7 @@ class World(
     var banner: String? = null
     var bannerLeft = 0f
     var sawFog = false
+    var furyLeft = 0f
 
     val power: Power
         get() {
@@ -195,6 +196,7 @@ class World(
         if (nightEvent == NightEvent.BLOOD_MOON) {
             m *= if (character.faction == Faction.VAMPIRE) 1.12f else 0.90f
         }
+        if (furyLeft > 0f) m *= 1f + meta.furyMul
         return m
     }
     fun cooldownMul() = (1f / power.ability) * (1f - passives.lv(PassiveId.COOLDOWN) * 0.08f).coerceAtLeast(0.45f) * meta.cdMul * rite.cdMul
@@ -228,6 +230,10 @@ class World(
         hitSfxCd = (hitSfxCd - dt).coerceAtLeast(0f)
         shake = (shake - dt * 38f).coerceAtLeast(0f)
         hurtFlash = (hurtFlash - dt * 3.4f).coerceAtLeast(0f)
+        furyLeft = (furyLeft - dt).coerceAtLeast(0f)
+        if (meta.regen > 0f && player.hp > 0f && player.hp < player.maxHp) {
+            player.hp = min(player.maxHp, player.hp + player.maxHp * meta.regen * dt)
+        }
         bannerLeft = (bannerLeft - dt).coerceAtLeast(0f)
         if (bannerLeft <= 0f) banner = null
         if (time >= RUN_SECONDS) {
@@ -812,7 +818,7 @@ class World(
             if (dist2(player.x, player.y, e.x, e.y) <= rr * rr) {
                 val taken = e.damage * (1f - armor()).coerceAtLeast(0.35f)
                 player.hp -= taken
-                player.invuln = 0.45f
+                player.invuln = 0.45f + meta.invulnAdd
                 e.touchCd = 0.35f
                 emit(Cue.HURT)
                 shake = 9f
@@ -854,6 +860,7 @@ class World(
             e.hp = 0f
             kills += 1
             emit(Cue.KILL)
+            if (meta.furyMul > 0f) furyLeft = 2.2f
             shake = (shake + if (e.role == Role.BOSS) 6f else 2.4f).coerceAtMost(12f)
             if (e.role == Role.BOSS) {
                 pickups += Pickup(e.x, e.y, 40, GemKind.GREATER)
@@ -867,11 +874,19 @@ class World(
         }
     }
 
+    private fun sipFromGem() {
+        if (meta.healOnGem <= 0f || player.hp <= 0f) return
+        val heal = player.maxHp * meta.healOnGem
+        if (heal < 0.4f) return
+        player.hp = min(player.maxHp, player.hp + heal)
+    }
+
     private fun dropGem(x: Float, y: Float, base: Int) {
         val r = rng.nextFloat()
+        val luck = meta.luck
         val kind = when {
-            r < 0.05f -> GemKind.VITAL
-            r < 0.16f -> GemKind.GREATER
+            r < 0.05f + luck * 0.4f -> GemKind.VITAL
+            r < 0.16f + luck -> GemKind.GREATER
             else -> GemKind.SOUL
         }
         val value = if (kind == GemKind.GREATER) base * 5 else base
@@ -895,10 +910,12 @@ class World(
                 when (g.kind) {
                     GemKind.SOUL -> {
                         addXp(g.value)
+                        sipFromGem()
                         emit(Cue.GEM)
                     }
                     GemKind.GREATER -> {
                         addXp(g.value)
+                        sipFromGem()
                         emit(Cue.GEM_RARE)
                     }
                     GemKind.VITAL -> {
@@ -1005,7 +1022,7 @@ class World(
         nextEvent = 52f + rng.nextFloat() * 24f
         val pick = NightEvent.entries[rng.nextInt(NightEvent.entries.size)]
         nightEvent = pick
-        eventLeft = 18f + rng.nextFloat() * 6f
+        eventLeft = (18f + rng.nextFloat() * 6f) * meta.eventTimeMul
         when (pick) {
             NightEvent.FOG -> {
                 sawFog = true
