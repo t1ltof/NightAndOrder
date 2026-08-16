@@ -10,7 +10,6 @@ import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
-import android.os.SystemClock
 import android.view.Choreographer
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -131,7 +130,7 @@ class GameView(
     private fun startLoop() {
         if (running) return
         running = true
-        lastNs = SystemClock.elapsedRealtimeNanos()
+        lastNs = 0L
         acc = 0f
         choreographer.postFrameCallback(this)
     }
@@ -146,6 +145,7 @@ class GameView(
         if (lastNs == 0L) lastNs = frameTimeNanos
         var dt = (frameTimeNanos - lastNs) / 1_000_000_000f
         lastNs = frameTimeNanos
+        if (dt < 0f) dt = 0f
         if (dt > 0.25f) dt = 0.25f
         acc += dt
         var steps = 0
@@ -383,13 +383,14 @@ class GameView(
         text.textAlign = Paint.Align.CENTER
         text.color = 0xFFE8C98A.toInt()
         text.textSize = w * 0.11f
-        c.drawText("НОЧЬ", w / 2f, h * 0.28f, text)
-        text.textSize = w * 0.055f
+        text.textSize = w * 0.10f
+        c.drawText("NIGHT", w / 2f, h * 0.28f, text)
+        text.textSize = w * 0.048f
         text.color = 0xFF8B1E2D.toInt()
-        c.drawText("И", w / 2f, h * 0.35f, text)
-        text.textSize = w * 0.11f
+        c.drawText("AND", w / 2f, h * 0.35f, text)
+        text.textSize = w * 0.10f
         text.color = 0xFFE8C98A.toInt()
-        c.drawText("ОРДЕН", w / 2f, h * 0.46f, text)
+        c.drawText("MIGHT", w / 2f, h * 0.46f, text)
         text.textSize = w * 0.038f
         text.color = 0x88E8D5A3.toInt()
         c.drawText("вампиры и Святой орден", w / 2f, h * 0.52f, text)

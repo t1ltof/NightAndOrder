@@ -31,6 +31,10 @@ class Sfx(context: Context, private val prefs: Prefs) {
 
     fun play(event: Cue) {
         val tg = tones ?: return
+        runCatching { playTone(tg, event) }
+    }
+
+    private fun playTone(tg: ToneGenerator, event: Cue) {
         when (event) {
             Cue.HIT -> tg.startTone(ToneGenerator.TONE_PROP_BEEP, 28)
             Cue.HURT -> tg.startTone(ToneGenerator.TONE_CDMA_SOFT_ERROR_LITE, 90)

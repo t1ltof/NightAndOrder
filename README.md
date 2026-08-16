@@ -1,4 +1,4 @@
-# Ночь и Орден
+# Night and Might
 
 Игра для Android в духе Vampire Survivors. Две стороны: вампиры и Святой орден.
 

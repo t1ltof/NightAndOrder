@@ -61,7 +61,7 @@ object Field {
     private fun at(cx: Int, cy: Int): Prop? {
         if (cx == 0 && cy == 0) return null
         val h = hash(cx, cy)
-        if (h % 5 != 0) return null
+        if (h % 3 != 0) return null
         val kind = when ((h ushr 8) % 4) {
             0 -> PropKind.ROCK
             1 -> PropKind.STONE
