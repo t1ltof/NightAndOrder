@@ -2,6 +2,7 @@ package com.nightandorder.game
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.LinearGradient
@@ -52,9 +53,17 @@ class GameView(
     private var keyU = false
     private var keyD = false
 
-    private val buttons = ArrayList<Hit>()
+    private val pendingHits = ArrayList<Hit>(16)
+    @Volatile private var liveHits: List<Hit> = emptyList()
     private var lastNs = 0L
     private var titlePulse = 0f
+    private var lastBrightNs = 0L
+    private var cachedBg: Bitmap? = null
+    private var cachedBgVampire = false
+    private var cachedBgW = 0
+    private var cachedBgH = 0
+    private val vampires = Catalog.characters.filter { it.faction == Faction.VAMPIRE }
+    private val holies = Catalog.characters.filter { it.faction == Faction.HOLY }
 
     init {
         holder.addCallback(this)
@@ -112,11 +121,14 @@ class GameView(
 
     override fun run() {
         while (running) {
-            val now = SystemClock.elapsedRealtimeNanos()
-            var dt = (now - lastNs) / 1_000_000_000f
-            lastNs = now
+            val frameStart = SystemClock.elapsedRealtimeNanos()
+            var dt = (frameStart - lastNs) / 1_000_000_000f
+            lastNs = frameStart
             if (dt > 0.05f) dt = 0.05f
-            brightness.refresh()
+            if (screen == Screen.PLAY && frameStart - lastBrightNs > 500_000_000L) {
+                brightness.refresh()
+                lastBrightNs = frameStart
+            }
             tick(dt)
             val canvas = holder.lockCanvas()
             if (canvas != null) {
@@ -125,9 +137,12 @@ class GameView(
                 } finally {
                     holder.unlockCanvasAndPost(canvas)
                 }
-            } else {
+            }
+            val tookMs = (SystemClock.elapsedRealtimeNanos() - frameStart) / 1_000_000L
+            val sleep = 16L - tookMs
+            if (sleep > 1L) {
                 try {
-                    Thread.sleep(8)
+                    Thread.sleep(sleep)
                 } catch (_: InterruptedException) {
                 }
             }
@@ -238,7 +253,9 @@ class GameView(
     }
 
     private fun onTap(x: Float, y: Float) {
-        for (b in buttons) {
+        val hits = liveHits
+        for (i in hits.indices.reversed()) {
+            val b = hits[i]
             if (b.contains(x, y)) {
                 b.action()
                 return
@@ -247,7 +264,7 @@ class GameView(
     }
 
     private fun drawAll(c: Canvas) {
-        buttons.clear()
+        pendingHits.clear()
         when (screen) {
             Screen.TITLE -> drawTitle(c)
             Screen.SELECT -> drawSelect(c)
@@ -265,29 +282,43 @@ class GameView(
                 drawEnd(c)
             }
         }
+        liveHits = pendingHits.toList()
     }
 
     private fun drawBackdrop(c: Canvas, vampireTint: Boolean) {
-        val w = c.width.toFloat()
-        val h = c.height.toFloat()
-        val top = if (vampireTint) 0xFF140810.toInt() else 0xFF101018.toInt()
-        val bot = if (vampireTint) 0xFF2A1018.toInt() else 0xFF1A1830.toInt()
-        paint.shader = LinearGradient(0f, 0f, 0f, h, top, bot, Shader.TileMode.CLAMP)
-        c.drawRect(0f, 0f, w, h, paint)
-        paint.shader = null
-        val tile = assets.tile
-        if (tile != null) {
-            paint.alpha = 70
-            var y = 0f
-            while (y < h) {
-                var x = 0f
-                while (x < w) {
-                    c.drawBitmap(tile, x, y, paint)
-                    x += tile.width
+        val w = c.width
+        val h = c.height
+        val cache = cachedBg
+        if (cache == null || cachedBgW != w || cachedBgH != h || cachedBgVampire != vampireTint) {
+            cache?.recycle()
+            val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.RGB_565)
+            val cc = Canvas(bmp)
+            val top = if (vampireTint) 0xFF140810.toInt() else 0xFF101018.toInt()
+            val bot = if (vampireTint) 0xFF2A1018.toInt() else 0xFF1A1830.toInt()
+            paint.shader = LinearGradient(0f, 0f, 0f, h.toFloat(), top, bot, Shader.TileMode.CLAMP)
+            cc.drawRect(0f, 0f, w.toFloat(), h.toFloat(), paint)
+            paint.shader = null
+            val tile = assets.tile
+            if (tile != null) {
+                paint.alpha = 70
+                var y = 0f
+                while (y < h) {
+                    var x = 0f
+                    while (x < w) {
+                        cc.drawBitmap(tile, x, y, paint)
+                        x += tile.width
+                    }
+                    y += tile.height
                 }
-                y += tile.height
+                paint.alpha = 255
             }
-            paint.alpha = 255
+            cachedBg = bmp
+            cachedBgW = w
+            cachedBgH = h
+            cachedBgVampire = vampireTint
+            c.drawBitmap(bmp, 0f, 0f, null)
+        } else {
+            c.drawBitmap(cache, 0f, 0f, null)
         }
     }
 
@@ -328,7 +359,7 @@ class GameView(
             text.color = Color.WHITE
             c.drawText("коснись, чтобы войти", w / 2f, h * 0.78f, text)
             text.alpha = 255
-            buttons += Hit(0f, 0f, w, h) { screen = Screen.SELECT }
+            pendingHits += Hit(0f, 0f, w, h) { screen = Screen.SELECT }
         }
     }
 
@@ -398,36 +429,43 @@ class GameView(
         val w = c.width.toFloat()
         val h = c.height.toFloat()
         text.textAlign = Paint.Align.CENTER
-        text.textSize = w * 0.048f
+        text.textSize = w * 0.046f
         text.color = 0xFFE8C98A.toInt()
-        c.drawText("Выбери кровь", w / 2f, h * 0.065f, text)
+        c.drawText("Выбери кровь", w / 2f, h * 0.055f, text)
 
-        text.textSize = w * 0.028f
+        text.textSize = w * 0.026f
         text.color = 0xFFB05060.toInt()
-        c.drawText("ВАМПИРЫ", w * 0.27f, h * 0.11f, text)
+        c.drawText("ВАМПИРЫ", w * 0.27f, h * 0.095f, text)
         text.color = 0xFFD4B06A.toInt()
-        c.drawText("СВЯТОЙ ОРДЕН", w * 0.73f, h * 0.11f, text)
+        c.drawText("СВЯТОЙ ОРДЕН", w * 0.73f, h * 0.095f, text)
 
-        val vamps = Catalog.characters.filter { it.faction == Faction.VAMPIRE }
-        val holies = Catalog.characters.filter { it.faction == Faction.HOLY }
-        val cardH = h * 0.145f
-        val step = h * 0.152f
-        vamps.forEachIndexed { i, def -> drawPortraitCard(c, def, w * 0.07f, h * 0.13f + i * step, w * 0.40f, cardH) }
-        holies.forEachIndexed { i, def -> drawPortraitCard(c, def, w * 0.53f, h * 0.13f + i * step, w * 0.40f, cardH) }
+        val gridTop = h * 0.11f
+        val gridBot = h * 0.62f
+        val cardW = w * 0.42f
+        val gapY = h * 0.012f
+        val cardH = (gridBot - gridTop - gapY * 2f) / 3f
+        val leftX = w * 0.055f
+        val rightX = w * 0.525f
+        vampires.forEachIndexed { i, def ->
+            drawPortraitCard(c, def, leftX, gridTop + i * (cardH + gapY), cardW, cardH)
+        }
+        holies.forEachIndexed { i, def ->
+            drawPortraitCard(c, def, rightX, gridTop + i * (cardH + gapY), cardW, cardH)
+        }
 
-        val loreY = h * 0.60f
+        val loreY = h * 0.64f
         paint.color = 0xCC120814.toInt()
-        tmp.set(w * 0.07f, loreY, w * 0.93f, h * 0.80f)
+        tmp.set(w * 0.055f, loreY, w * 0.945f, h * 0.81f)
         c.drawRoundRect(tmp, 18f, 18f, paint)
         text.color = 0xFFE8D5A3.toInt()
-        text.textSize = w * 0.044f
-        c.drawText(selected.name, w / 2f, loreY + h * 0.045f, text)
-        text.textSize = w * 0.030f
+        text.textSize = w * 0.042f
+        c.drawText(selected.name, w / 2f, loreY + h * 0.04f, text)
+        text.textSize = w * 0.028f
         text.color = 0x88E8D5A3.toInt()
-        c.drawText(selected.title, w / 2f, loreY + h * 0.078f, text)
-        text.textSize = w * 0.034f
+        c.drawText(selected.title, w / 2f, loreY + h * 0.07f, text)
+        text.textSize = w * 0.032f
         text.color = Color.WHITE
-        c.drawText(selected.lore, w / 2f, loreY + h * 0.13f, text)
+        drawFittedText(c, selected.lore, w / 2f, loreY + h * 0.12f, w * 0.84f, w * 0.032f)
 
         drawButton(c, w * 0.18f, h * 0.84f, w * 0.64f, h * 0.075f, "В ПОЛЕ", 0xFF6A1824.toInt()) {
             startRun(selected)
@@ -449,23 +487,37 @@ class GameView(
         c.drawRoundRect(tmp, 16f, 16f, paint)
         paint.style = Paint.Style.FILL
 
+        val nameSize = (bh * 0.13f).coerceAtMost(bw * 0.13f)
+        val titleSize = nameSize * 0.72f
+        val textBlock = nameSize + titleSize + bh * 0.08f
+        val spriteRoom = (bh - textBlock - 10f).coerceAtLeast(bh * 0.45f)
+        val sprite = spriteRoom.coerceAtMost(bw * 0.72f)
         val bmp = assets.characters[def.id]
         if (bmp != null) {
-            val s = bh * 0.78f
-            val dx = x + 8f
-            val dy = y + (bh - s) / 2f
-            tmp.set(dx, dy, dx + s, dy + s)
+            val dx = x + (bw - sprite) / 2f
+            val dy = y + 6f
+            tmp.set(dx, dy, dx + sprite, dy + sprite)
             c.drawBitmap(bmp, null, tmp, paint)
         }
-        text.textAlign = Paint.Align.LEFT
-        text.textSize = bw * 0.13f
-        text.color = Color.WHITE
-        c.drawText(def.name, x + bh * 0.85f, y + bh * 0.45f, text)
-        text.textSize = bw * 0.09f
-        text.color = 0x88E8D5A3.toInt()
-        c.drawText(def.title, x + bh * 0.85f, y + bh * 0.68f, text)
+        val nameY = y + 6f + sprite + nameSize
         text.textAlign = Paint.Align.CENTER
-        buttons += Hit(x, y, x + bw, y + bh) { selected = def }
+        text.textSize = nameSize
+        text.color = Color.WHITE
+        drawFittedText(c, def.name, x + bw / 2f, nameY, bw * 0.9f, nameSize)
+        text.textSize = titleSize
+        text.color = 0x88E8D5A3.toInt()
+        drawFittedText(c, def.title, x + bw / 2f, nameY + titleSize + 2f, bw * 0.92f, titleSize)
+        pendingHits += Hit(x, y, x + bw, y + bh) { selected = def }
+    }
+
+    private fun drawFittedText(c: Canvas, value: String, cx: Float, y: Float, maxW: Float, want: Float) {
+        var size = want
+        text.textSize = size
+        while (size > 10f && text.measureText(value) > maxW) {
+            size -= 1f
+            text.textSize = size
+        }
+        c.drawText(value, cx, y, text)
     }
 
     private fun drawPlay(c: Canvas) {
@@ -581,50 +633,49 @@ class GameView(
         val w = c.width.toFloat()
         val h = c.height.toFloat()
         paint.color = 0x88000000.toInt()
-        c.drawRect(0f, 0f, w, h * 0.11f, paint)
+        c.drawRect(0f, 0f, w, h * 0.105f, paint)
 
+        val barRight = w * 0.62f
         val hp = (wld.player.hp / wld.player.maxHp).coerceIn(0f, 1f)
         paint.color = 0xFF2A1014.toInt()
-        tmp.set(w * 0.04f, h * 0.018f, w * 0.62f, h * 0.042f)
+        tmp.set(w * 0.03f, h * 0.016f, barRight, h * 0.040f)
         c.drawRoundRect(tmp, 8f, 8f, paint)
         paint.color = 0xFFA02030.toInt()
-        tmp.right = tmp.left + (w * 0.58f) * hp
+        tmp.right = tmp.left + (barRight - tmp.left) * hp
         c.drawRoundRect(tmp, 8f, 8f, paint)
 
         val xp = (wld.xp.toFloat() / wld.xpToNext).coerceIn(0f, 1f)
         paint.color = 0xFF102028.toInt()
-        tmp.set(w * 0.04f, h * 0.05f, w * 0.62f, h * 0.068f)
+        tmp.set(w * 0.03f, h * 0.048f, barRight, h * 0.068f)
         c.drawRoundRect(tmp, 8f, 8f, paint)
         paint.color = 0xFF6EC0E8.toInt()
-        tmp.right = tmp.left + (w * 0.58f) * xp
+        tmp.right = tmp.left + (barRight - tmp.left) * xp
         c.drawRoundRect(tmp, 8f, 8f, paint)
 
-        text.textAlign = Paint.Align.RIGHT
-        text.textSize = w * 0.045f
-        text.color = 0xFFE8D5A3.toInt()
-        val sec = wld.time.toInt()
-        val clock = "%d:%02d".format(sec / 60, sec % 60)
-        c.drawText(clock, w * 0.96f, h * 0.04f, text)
-        text.textSize = w * 0.028f
-        text.color = 0x88FFFFFF.toInt()
-        c.drawText("ур. ${wld.level}   ${wld.kills}", w * 0.96f, h * 0.07f, text)
-
-        // nameless rite mark — intensity only
         val rite = wld.power.rite
-        val cx = w * 0.78f
-        val cy = h * 0.04f
+        val cx = w * 0.68f
+        val cy = h * 0.042f
         paint.color = 0x33000000.toInt()
-        c.drawCircle(cx, cy, 16f, paint)
+        c.drawCircle(cx, cy, 14f, paint)
         paint.style = Paint.Style.STROKE
         paint.strokeWidth = 3f
         paint.color = if (wld.character.faction == Faction.VAMPIRE) 0xFF8B1E2D.toInt() else 0xFFD4B06A.toInt()
-        c.drawCircle(cx, cy, 16f, paint)
+        c.drawCircle(cx, cy, 14f, paint)
         paint.style = Paint.Style.FILL
         paint.alpha = (40 + rite * 200).toInt()
-        c.drawCircle(cx, cy, 10f * (0.35f + rite * 0.65f), paint)
+        c.drawCircle(cx, cy, 8f * (0.35f + rite * 0.65f), paint)
         paint.alpha = 255
 
-        drawButton(c, w * 0.86f, h * 0.085f, w * 0.11f, h * 0.045f, "II", 0x66201018.toInt()) {
+        text.textAlign = Paint.Align.CENTER
+        text.textSize = w * 0.040f
+        text.color = 0xFFE8D5A3.toInt()
+        val sec = wld.time.toInt()
+        c.drawText("%d:%02d".format(sec / 60, sec % 60), w * 0.82f, h * 0.038f, text)
+        text.textSize = w * 0.024f
+        text.color = 0x88FFFFFF.toInt()
+        c.drawText("ур.${wld.level}  ${wld.kills}", w * 0.82f, h * 0.068f, text)
+
+        drawButton(c, w * 0.90f, h * 0.018f, w * 0.08f, h * 0.062f, "II", 0x66201018.toInt()) {
             if (screen == Screen.PLAY) screen = Screen.PAUSE
         }
     }
@@ -651,11 +702,10 @@ class GameView(
             paint.style = Paint.Style.FILL
             text.color = Color.WHITE
             text.textSize = w * 0.045f
-            c.drawText(offer.title, w / 2f, y + h * 0.06f, text)
-            text.textSize = w * 0.032f
+            drawFittedText(c, offer.title, w / 2f, y + h * 0.06f, w * 0.72f, w * 0.045f)
             text.color = 0xCCE8D5A3.toInt()
-            c.drawText(offer.body, w / 2f, y + h * 0.105f, text)
-            buttons += Hit(tmp.left, tmp.top, tmp.right, tmp.bottom) {
+            drawFittedText(c, offer.body, w / 2f, y + h * 0.105f, w * 0.74f, w * 0.032f)
+            pendingHits += Hit(tmp.left, tmp.top, tmp.right, tmp.bottom) {
                 wld.pick(offer)
                 screen = Screen.PLAY
             }
@@ -686,9 +736,16 @@ class GameView(
         val h = c.height.toFloat()
         val win = wld.end == RunEnd.DAWN
         text.textAlign = Paint.Align.CENTER
-        text.textSize = w * 0.07f
+        text.textSize = w * 0.06f
         text.color = if (win) 0xFFE8C98A.toInt() else 0xFFC05060.toInt()
-        c.drawText(if (win) "Рассвет застал вас" else "Поле взяло своё", w / 2f, h * 0.28f, text)
+        drawFittedText(
+            c,
+            if (win) "Рассвет застал вас" else "Поле взяло своё",
+            w / 2f,
+            h * 0.28f,
+            w * 0.86f,
+            w * 0.06f,
+        )
         text.textSize = w * 0.038f
         text.color = Color.WHITE
         val sec = wld.time.toInt()
@@ -738,7 +795,7 @@ class GameView(
         text.color = Color.WHITE
         text.textSize = bh * 0.42f
         c.drawText(label, x + bw / 2f, y + bh * 0.66f, text)
-        buttons += Hit(x, y, x + bw, y + bh, action)
+        pendingHits += Hit(x, y, x + bw, y + bh, action)
     }
 
     private class Hit(
