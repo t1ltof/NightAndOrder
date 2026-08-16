@@ -9,7 +9,7 @@ enum class WeaponId {
     SOLAR_CROWN, FINAL_WORD, HALLOWED_GROUND,
 }
 
-enum class EnemyKind { THRALL, BAT, FLAGELLANT, KNIGHT, BOSS }
+enum class EnemyKind { THRALL, BAT, FLAGELLANT, KNIGHT, ARCHER, VESSEL, WARDEN, BOSS, HERALD }
 
 enum class BoltArt {
     FANG, BAT, ORB, SPEAR, HEX, CROSS;

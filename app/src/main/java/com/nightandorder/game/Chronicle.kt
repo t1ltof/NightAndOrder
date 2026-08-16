@@ -1,5 +1,10 @@
 package com.nightandorder.game
 
+data class ChronicleNews(
+    val heroes: List<CharacterId> = emptyList(),
+    val relics: List<Relic> = emptyList(),
+)
+
 object Chronicle {
     fun isOpen(prefs: Prefs, id: CharacterId): Boolean {
         if (id == CharacterId.MORVAN || id == CharacterId.LUCIA) return true
@@ -19,22 +24,38 @@ object Chronicle {
         CharacterId.SERA -> "Дожить до зари за орден. Или открыть Хейла и накопить 180 убийств ордена."
     }
 
-    fun record(prefs: Prefs, world: World): List<CharacterId> {
+    fun record(prefs: Prefs, world: World): ChronicleNews {
         val id = world.character.id
         val faction = world.character.faction
         prefs.addRun(id, faction, world.time, world.kills, world.level, world.end == RunEnd.DAWN)
-        val fresh = ArrayList<CharacterId>()
+        if (world.daily) {
+            prefs.recordDaily(world.character.name, world.time, world.kills, world.end == RunEnd.DAWN)
+        }
+        val heroes = ArrayList<CharacterId>()
         fun tryUnlock(who: CharacterId) {
             if (!isOpen(prefs, who) && qualifies(prefs, world, who)) {
                 prefs.unlockHero(who)
-                fresh += who
+                heroes += who
             }
         }
         tryUnlock(CharacterId.LILITH)
         tryUnlock(CharacterId.NIX)
         tryUnlock(CharacterId.HALE)
         tryUnlock(CharacterId.SERA)
-        return fresh
+        val relics = ArrayList<Relic>()
+        fun tryRelic(relic: Relic, ok: Boolean) {
+            if (ok && !prefs.hasRelic(relic)) {
+                prefs.grantRelic(relic)
+                relics += relic
+            }
+        }
+        tryRelic(Relic.FIRST_DAWN, world.end == RunEnd.DAWN)
+        tryRelic(Relic.SABBATH, world.sabbath)
+        tryRelic(Relic.PALE_DEATH, world.end == RunEnd.DEAD && world.moon >= 0.82f)
+        tryRelic(Relic.CHAPEL, world.biome == Biome.CHAPEL && world.time >= 180f)
+        tryRelic(Relic.FOG, world.sawFog)
+        tryRelic(Relic.DAILY, world.daily && world.time >= 120f)
+        return ChronicleNews(heroes, relics)
     }
 
     private fun qualifies(prefs: Prefs, world: World, who: CharacterId): Boolean {

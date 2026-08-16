@@ -99,4 +99,39 @@ class Prefs(context: Context) {
         }
         e.apply()
     }
+
+    fun hasRelic(relic: Relic): Boolean = p.getBoolean("rel_${relic.name}", false)
+
+    fun grantRelic(relic: Relic) {
+        p.edit().putBoolean("rel_${relic.name}", true).apply()
+    }
+
+    fun dailyStamp(): String = p.getString("daily_stamp", "") ?: ""
+    fun dailyTime(): Float = p.getFloat("daily_time", 0f)
+    fun dailyKills(): Int = p.getInt("daily_kills", 0)
+    fun dailyHero(): String = p.getString("daily_hero", "") ?: ""
+    fun dailyDawn(): Boolean = p.getBoolean("daily_dawn", false)
+
+    fun recordDaily(hero: String, time: Float, kills: Int, dawn: Boolean) {
+        val today = Night.today()
+        val e = p.edit()
+        if (dailyStamp() != today) {
+            e.putString("daily_stamp", today)
+            e.putFloat("daily_time", time)
+            e.putInt("daily_kills", kills)
+            e.putString("daily_hero", hero)
+            e.putBoolean("daily_dawn", dawn)
+        } else {
+            val better = time > dailyTime() || (time == dailyTime() && kills > dailyKills())
+            if (better) {
+                e.putFloat("daily_time", time)
+                e.putInt("daily_kills", kills)
+                e.putString("daily_hero", hero)
+                e.putBoolean("daily_dawn", dawn)
+            } else if (dawn) {
+                e.putBoolean("daily_dawn", true)
+            }
+        }
+        e.apply()
+    }
 }

@@ -1,6 +1,6 @@
 package com.nightandorder.game
 
-enum class PropKind { ROCK, STONE, TREE, TREE_WIDE }
+enum class PropKind { ROCK, STONE, TREE, TREE_WIDE, PILLAR, CROSS, SLAB }
 
 data class Prop(
     val kind: PropKind,
@@ -13,6 +13,7 @@ data class Prop(
 
 object Field {
     const val CELL = 200f
+    var biome: Biome = Biome.GRAVE
 
     fun forEachNear(px: Float, py: Float, range: Float, block: (Prop) -> Unit) {
         val minCx = kotlin.math.floor((px - range) / CELL).toInt()
@@ -62,11 +63,21 @@ object Field {
         if (cx == 0 && cy == 0) return null
         val h = hash(cx, cy)
         if (h % 3 != 0) return null
-        val kind = when ((h ushr 8) % 4) {
-            0 -> PropKind.ROCK
-            1 -> PropKind.STONE
-            2 -> PropKind.TREE
-            else -> PropKind.TREE_WIDE
+        val kind = if (biome == Biome.CHAPEL) {
+            when ((h ushr 8) % 4) {
+                0 -> PropKind.PILLAR
+                1 -> PropKind.STONE
+                2 -> PropKind.CROSS
+                else -> PropKind.SLAB
+            }
+        } else {
+            when ((h ushr 8) % 5) {
+                0 -> PropKind.ROCK
+                1 -> PropKind.STONE
+                2 -> PropKind.TREE
+                3 -> PropKind.TREE_WIDE
+                else -> PropKind.CROSS
+            }
         }
         val ox = ((h ushr 3) % 70) - 35
         val oy = ((h ushr 11) % 70) - 35
@@ -77,6 +88,9 @@ object Field {
             PropKind.STONE -> Prop(kind, x, y, 16f, 34f, 38f)
             PropKind.TREE -> Prop(kind, x, y, 18f, 56f, 78f)
             PropKind.TREE_WIDE -> Prop(kind, x, y, 20f, 64f, 82f)
+            PropKind.PILLAR -> Prop(kind, x, y, 16f, 36f, 88f)
+            PropKind.CROSS -> Prop(kind, x, y, 14f, 40f, 62f)
+            PropKind.SLAB -> Prop(kind, x, y, 20f, 52f, 28f)
         }
     }
 

@@ -114,15 +114,20 @@ object Meta {
             craft >= 3 -> 2
             else -> 1
         }
+        val r = { relic: Relic -> if (prefs.hasRelic(relic)) 1f else 0f }
+        val sabbathVamp = if (def.faction == Faction.VAMPIRE) r(Relic.SABBATH) else 0f
+        val sabbathHoly = if (def.faction == Faction.HOLY) r(Relic.SABBATH) else 0f
         return MetaMods(
-            hpMul = 1f + h(HeroPerk.VITALITY) * 0.10f + f(FactionPerk.BLOODLINE) * 0.06f,
-            dmgMul = 1f + h(HeroPerk.MIGHT) * 0.07f + f(FactionPerk.HUNT) * 0.05f,
+            hpMul = 1f + h(HeroPerk.VITALITY) * 0.10f + f(FactionPerk.BLOODLINE) * 0.06f + r(Relic.FIRST_DAWN) * 0.06f,
+            dmgMul = 1f + h(HeroPerk.MIGHT) * 0.07f + f(FactionPerk.HUNT) * 0.05f +
+                sabbathVamp * 0.06f + r(Relic.DAILY) * 0.04f,
             spdMul = 1f + h(HeroPerk.SWIFT) * 0.05f,
             cdMul = (1f - h(HeroPerk.CRAFT) * 0.04f - f(FactionPerk.RITE) * 0.03f).coerceAtLeast(0.70f),
-            areaMul = 1f + h(HeroPerk.CRAFT) * 0.04f + f(FactionPerk.RITE) * 0.03f,
-            magnetAdd = h(HeroPerk.GREED) * 14f + f(FactionPerk.HOLD) * 10f,
-            armorAdd = f(FactionPerk.HOLD) * 0.03f,
-            xpMul = 1f + h(HeroPerk.GREED) * 0.08f,
+            areaMul = 1f + h(HeroPerk.CRAFT) * 0.04f + f(FactionPerk.RITE) * 0.03f + r(Relic.CHAPEL) * 0.07f,
+            magnetAdd = h(HeroPerk.GREED) * 14f + f(FactionPerk.HOLD) * 10f +
+                r(Relic.PALE_DEATH) * 16f + sabbathHoly * 18f,
+            armorAdd = f(FactionPerk.HOLD) * 0.03f + r(Relic.FOG) * 0.03f,
+            xpMul = 1f + h(HeroPerk.GREED) * 0.08f + r(Relic.PALE_DEATH) * 0.06f,
             startSigLevel = start,
             brightShift = f(FactionPerk.NIGHTLAW) * 0.035f,
         )

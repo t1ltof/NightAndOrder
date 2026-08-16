@@ -62,7 +62,12 @@ object Rites {
         )
     }
 
-    fun mods(faction: Faction, hero: CharacterId, s: RiteSample): RiteMods {
+    fun mods(faction: Faction, hero: CharacterId, s: RiteSample, daily: Boolean = false): RiteMods {
+        val src = if (daily) s.copy(battery = 0.55f, charging = false) else s
+        return modsOf(faction, hero, src)
+    }
+
+    private fun modsOf(faction: Faction, hero: CharacterId, s: RiteSample): RiteMods {
         var dmg = 1f
         var hp = 1f
         var spd = 1f

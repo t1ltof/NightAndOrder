@@ -57,6 +57,9 @@ class GameView(
     private var payoutDone = false
     private var lastPayout = 0
     private var lastUnlocks: List<CharacterId> = emptyList()
+    private var lastRelics: List<Relic> = emptyList()
+    private var dailyPick = false
+    private var chronicleHeroTab = true
     private var riteSnap = Rites.sample(context)
 
     private var stickId = -1
@@ -185,7 +188,7 @@ class GameView(
             riteSnap = Rites.sample(context)
             val run = world
             if (run != null) {
-                run.rite = Rites.mods(run.character.faction, run.character.id, riteSnap)
+                run.rite = Rites.mods(run.character.faction, run.character.id, riteSnap, run.daily)
             }
             lastBrightNs = frameTimeNanos
         }
@@ -223,7 +226,9 @@ class GameView(
                     if (!payoutDone) {
                         payoutDone = true
                         lastPayout = Meta.award(prefs, w)
-                        lastUnlocks = Chronicle.record(prefs, w)
+                        val news = Chronicle.record(prefs, w)
+                        lastUnlocks = news.heroes
+                        lastRelics = news.relics
                     }
                     screen = Screen.END
                 }
@@ -249,8 +254,16 @@ class GameView(
     private fun startRun(def: CharacterDef) {
         if (!Chronicle.isOpen(prefs, def.id)) return
         riteSnap = Rites.sample(context)
-        val mods = Rites.mods(def.faction, def.id, riteSnap)
-        world = World(def, Meta.resolve(prefs, def), mods)
+        val daily = dailyPick
+        val mods = Rites.mods(def.faction, def.id, riteSnap, daily)
+        val biome = Night.biomeFor(daily, def.faction)
+        world = World(
+            def, Meta.resolve(prefs, def), mods,
+            biome = biome,
+            daily = daily,
+            sabbath = riteSnap.sabbath,
+            moon = riteSnap.moon,
+        )
         world?.brightness = brightness.brightness
         stickId = -1
         stickX = 0f
@@ -258,6 +271,7 @@ class GameView(
         payoutDone = false
         lastPayout = 0
         lastUnlocks = emptyList()
+        lastRelics = emptyList()
         screen = Screen.PLAY
     }
 
@@ -325,8 +339,10 @@ class GameView(
             KeyEvent.KEYCODE_W, KeyEvent.KEYCODE_DPAD_UP -> keyU = true
             KeyEvent.KEYCODE_S, KeyEvent.KEYCODE_DPAD_DOWN -> keyD = true
             KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_SPACE -> {
-                if (screen == Screen.TITLE) screen = Screen.SELECT
-                else if (screen == Screen.SELECT) startRun(selected)
+                if (screen == Screen.TITLE) {
+                    dailyPick = false
+                    screen = Screen.SELECT
+                } else if (screen == Screen.SELECT) startRun(selected)
             }
             KeyEvent.KEYCODE_P, KeyEvent.KEYCODE_ESCAPE -> onBack()
             else -> return super.onKeyDown(keyCode, event)
@@ -451,7 +467,12 @@ class GameView(
         text.color = 0x66E8D5A3.toInt()
         c.drawText(BuildConfig.VERSION_NAME, w / 2f, h * 0.57f, text)
         drawButton(c, w * 0.04f, h * 0.03f, w * 0.24f, h * 0.055f, "Хроника", 0xAA201018.toInt()) {
+            chronicleHeroTab = true
             screen = Screen.CHRONICLE
+        }
+        drawButton(c, w * 0.30f, h * 0.03f, w * 0.28f, h * 0.055f, "Ночь дня", 0xAA201018.toInt()) {
+            dailyPick = true
+            screen = Screen.SELECT
         }
         drawButton(c, w * 0.72f, h * 0.03f, w * 0.24f, h * 0.055f, "Настройки", 0xAA201018.toInt()) {
             settingsBack = Screen.TITLE
@@ -465,6 +486,7 @@ class GameView(
         if (showUpdate) {
             drawUpdateCard(c, w, h)
             drawButton(c, w * 0.22f, h * 0.60f, w * 0.56f, h * 0.07f, "Войти", 0xFF3A2018.toInt()) {
+                dailyPick = false
                 screen = Screen.SELECT
             }
         } else {
@@ -474,7 +496,10 @@ class GameView(
             text.color = Color.WHITE
             c.drawText("нажмите, чтобы начать", w / 2f, h * 0.78f, text)
             text.alpha = 255
-            pendingHits += Hit(0f, h * 0.12f, w, h) { screen = Screen.SELECT }
+            pendingHits += Hit(0f, h * 0.12f, w, h) {
+                dailyPick = false
+                screen = Screen.SELECT
+            }
         }
     }
 
@@ -546,7 +571,11 @@ class GameView(
         text.textAlign = Paint.Align.CENTER
         text.textSize = w * 0.046f
         text.color = 0xFFE8C98A.toInt()
-        c.drawText("Выберите героя", w / 2f, h * 0.055f, text)
+        if (dailyPick) {
+            c.drawText("Ночь ${Night.dateLabel()}", w / 2f, h * 0.055f, text)
+        } else {
+            c.drawText("Выберите героя", w / 2f, h * 0.055f, text)
+        }
 
         text.textSize = w * 0.026f
         text.color = 0xFFB05060.toInt()
@@ -709,7 +738,7 @@ class GameView(
 
         c.drawColor(0xFF141018.toInt())
         resetPaint()
-        val ground = assets.ground
+        val ground = if (wld.biome == Biome.CHAPEL) assets.chapelGround ?: assets.ground else assets.ground
         if (ground != null) {
             val tw = ground.width.toFloat()
             val ox = posMod(camX * scale, tw)
@@ -727,7 +756,9 @@ class GameView(
 
         val viewRange = 420f
         Field.forEachNear(camX, camY, viewRange) { prop ->
-            if (prop.kind == PropKind.TREE || prop.kind == PropKind.TREE_WIDE) return@forEachNear
+            if (prop.kind == PropKind.TREE || prop.kind == PropKind.TREE_WIDE ||
+                prop.kind == PropKind.PILLAR || prop.kind == PropKind.CROSS
+            ) return@forEachNear
             drawProp(c, prop, sx(prop.x), sy(prop.y), scale)
         }
 
@@ -821,7 +852,9 @@ class GameView(
         resetPaint()
 
         Field.forEachNear(camX, camY, viewRange) { prop ->
-            if (prop.kind != PropKind.TREE && prop.kind != PropKind.TREE_WIDE) return@forEachNear
+            if (prop.kind != PropKind.TREE && prop.kind != PropKind.TREE_WIDE &&
+                prop.kind != PropKind.PILLAR && prop.kind != PropKind.CROSS
+            ) return@forEachNear
             drawProp(c, prop, sx(prop.x), sy(prop.y), scale)
         }
 
@@ -855,6 +888,19 @@ class GameView(
             paint.color = Color.argb((40 + t * 70).toInt(), 255, 210, 140)
             c.drawRect(0f, 0f, w, h, paint)
             resetPaint()
+        }
+        when (wld.nightEvent) {
+            NightEvent.FOG -> {
+                paint.color = 0x55101820.toInt()
+                c.drawRect(0f, 0f, w, h, paint)
+                resetPaint()
+            }
+            NightEvent.BLOOD_MOON -> {
+                paint.color = 0x33A01820.toInt()
+                c.drawRect(0f, 0f, w, h, paint)
+                resetPaint()
+            }
+            else -> Unit
         }
         if (wld.hurtFlash > 0f) {
             paint.color = Color.argb((wld.hurtFlash * 90f).toInt().coerceIn(0, 110), 180, 20, 30)
@@ -943,6 +989,13 @@ class GameView(
 
         drawButton(c, w * 0.90f, h * 0.018f, w * 0.08f, h * 0.062f, "II", 0x66201018.toInt()) {
             if (screen == Screen.PLAY) screen = Screen.PAUSE
+        }
+        val ban = wld.banner
+        if (ban != null && wld.bannerLeft > 0f) {
+            text.textAlign = Paint.Align.CENTER
+            text.textSize = w * 0.034f
+            text.color = 0xE8E8C98A.toInt()
+            c.drawText(ban, w / 2f, h * 0.14f, text)
         }
     }
 
@@ -1251,22 +1304,72 @@ class GameView(
         text.textAlign = Paint.Align.CENTER
         text.color = 0xFFE8C98A.toInt()
         text.textSize = w * 0.048f
-        c.drawText("Хроника", w / 2f, h * 0.055f, text)
-        text.textSize = w * 0.024f
+        c.drawText("Хроника", w / 2f, h * 0.048f, text)
+        drawTab(c, w * 0.055f, h * 0.065f, w * 0.44f, h * 0.05f, "Герои", chronicleHeroTab, 0xFF8B1E2D.toInt()) {
+            chronicleHeroTab = true
+        }
+        drawTab(c, w * 0.505f, h * 0.065f, w * 0.44f, h * 0.05f, "Следы", !chronicleHeroTab, 0xFFD4B06A.toInt()) {
+            chronicleHeroTab = false
+        }
+        text.textAlign = Paint.Align.CENTER
+        text.textSize = w * 0.022f
         text.color = 0x88E8D5A3.toInt()
-        val vk = prefs.factionKills(Faction.VAMPIRE)
-        val hk = prefs.factionKills(Faction.HOLY)
-        c.drawText("ночь $vk убийств · ${prefs.factionDawns(Faction.VAMPIRE)} зорь   ·   орден $hk · ${prefs.factionDawns(Faction.HOLY)}", w / 2f, h * 0.085f, text)
-
-        val top = h * 0.105f
-        val bot = h * 0.84f
-        val rowH = (bot - top) / 6f
-        Catalog.characters.forEachIndexed { i, def ->
-            drawChronicleRow(c, def, w * 0.055f, top + i * rowH, w * 0.89f, rowH - h * 0.008f)
+        if (chronicleHeroTab) {
+            val vk = prefs.factionKills(Faction.VAMPIRE)
+            val hk = prefs.factionKills(Faction.HOLY)
+            c.drawText("ночь $vk · ${prefs.factionDawns(Faction.VAMPIRE)} зорь   ·   орден $hk · ${prefs.factionDawns(Faction.HOLY)}", w / 2f, h * 0.135f, text)
+            val top = h * 0.15f
+            val bot = h * 0.84f
+            val rowH = (bot - top) / 6f
+            Catalog.characters.forEachIndexed { i, def ->
+                drawChronicleRow(c, def, w * 0.055f, top + i * rowH, w * 0.89f, rowH - h * 0.008f)
+            }
+        } else {
+            val today = Night.today()
+            val dailyLine = if (prefs.dailyStamp() == today && prefs.dailyTime() > 0f) {
+                val sec = prefs.dailyTime().toInt()
+                "сегодня ${Night.dateLabel()}: ${"%d:%02d".format(sec / 60, sec % 60)} · ${prefs.dailyKills()} · ${prefs.dailyHero()}"
+            } else {
+                "сегодня ${Night.dateLabel()}: ещё не ходили"
+            }
+            c.drawText(dailyLine, w / 2f, h * 0.135f, text)
+            val top = h * 0.15f
+            val bot = h * 0.84f
+            val rowH = (bot - top) / 6f
+            Relic.entries.forEachIndexed { i, relic ->
+                drawRelicRow(c, relic, w * 0.055f, top + i * rowH, w * 0.89f, rowH - h * 0.008f)
+            }
         }
         drawButton(c, w * 0.2f, h * 0.86f, w * 0.6f, h * 0.07f, "Назад", 0xFF6A1824.toInt()) {
             screen = Screen.TITLE
         }
+    }
+
+    private fun drawRelicRow(c: Canvas, relic: Relic, x: Float, y: Float, bw: Float, bh: Float) {
+        val open = prefs.hasRelic(relic)
+        paint.color = 0xCC120814.toInt()
+        tmp.set(x, y, x + bw, y + bh)
+        c.drawRoundRect(tmp, 14f, 14f, paint)
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 1.4f
+        paint.color = if (open) 0xFFD4B06A.toInt() else 0x44505050.toInt()
+        c.drawRoundRect(tmp, 14f, 14f, paint)
+        paint.style = Paint.Style.FILL
+        text.textAlign = Paint.Align.LEFT
+        text.textSize = bh * 0.28f
+        text.color = if (open) Color.WHITE else 0x66E8D5A3.toInt()
+        c.drawText(if (open) relic.title else "???", x + 16f, y + bh * 0.38f, text)
+        text.textSize = bh * 0.20f
+        text.color = 0x88E8D5A3.toInt()
+        drawFittedText(
+            c,
+            if (open) relic.blurb else relic.hint,
+            x + 16f,
+            y + bh * 0.72f,
+            bw - 28f,
+            bh * 0.20f,
+        )
+        text.textAlign = Paint.Align.CENTER
     }
 
     private fun drawChronicleRow(c: Canvas, def: CharacterDef, x: Float, y: Float, bw: Float, bh: Float) {
@@ -1306,6 +1409,7 @@ class GameView(
         text.textAlign = Paint.Align.CENTER
         pendingHits += Hit(x, y, x + bw, y + bh) {
             selected = def
+            dailyPick = false
             screen = Screen.SELECT
         }
     }
@@ -1315,7 +1419,7 @@ class GameView(
         when (screen) {
             Screen.TITLE, Screen.SELECT, Screen.META, Screen.CHRONICLE, Screen.SETTINGS -> {
                 music.vampire = selected.faction == Faction.VAMPIRE
-                music.bed = Music.Bed.MENU
+                music.bed = if (dailyPick && screen == Screen.SELECT) Music.Bed.NIGHT else Music.Bed.MENU
             }
             Screen.PLAY, Screen.LEVELUP, Screen.CHEST, Screen.PAUSE -> {
                 music.vampire = run?.character?.faction == Faction.VAMPIRE
@@ -1365,10 +1469,13 @@ class GameView(
         c.drawText(line, w / 2f, h * 0.57f, text)
         text.textSize = w * 0.026f
         text.color = 0x99E8C98A.toInt()
-        val extra = if (lastUnlocks.isNotEmpty()) {
-            "В хронике: " + lastUnlocks.joinToString(", ") { Catalog.character(it).name }
-        } else {
-            Rites.whisper(wld.character.faction, wld.character.id, riteSnap)
+        val extra = when {
+            lastUnlocks.isNotEmpty() ->
+                "В хронике: " + lastUnlocks.joinToString(", ") { Catalog.character(it).name }
+            lastRelics.isNotEmpty() ->
+                "След: " + lastRelics.joinToString(", ") { it.title }
+            wld.daily -> "Ночь дня. ${Night.dateLabel()}."
+            else -> Rites.whisper(wld.character.faction, wld.character.id, riteSnap)
         }
         drawFittedText(c, extra, w / 2f, h * 0.62f, w * 0.86f, w * 0.026f)
         drawButton(c, w * 0.18f, h * 0.68f, w * 0.64f, h * 0.075f, "Ещё раз", 0xFF6A1824.toInt()) {

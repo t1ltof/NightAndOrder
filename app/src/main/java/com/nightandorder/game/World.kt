@@ -34,6 +34,7 @@ class Enemy(
     var role: Role = Role.MOB,
     var invuln: Boolean = false,
     var flash: Float = 0f,
+    var shootCd: Float = 0f,
 )
 
 enum class Role { MOB, BOSS, SERVANT }
@@ -59,6 +60,7 @@ class Projectile(
     var seekTurn: Float = 0f,
     var explode: Boolean = false,
     var explodeRadius: Float = 0f,
+    var hostile: Boolean = false,
 )
 
 class Pickup(
@@ -115,6 +117,10 @@ class World(
     val character: CharacterDef,
     val meta: MetaMods = MetaMods(),
     startRite: RiteMods = RiteMods(),
+    val biome: Biome = Biome.GRAVE,
+    val daily: Boolean = false,
+    val sabbath: Boolean = false,
+    val moon: Float = 0.5f,
 ) {
     val player = Player(character)
     val enemies = ArrayList<Enemy>(256)
@@ -156,6 +162,12 @@ class World(
     var lookAways = 0
     var shake = 0f
     var hurtFlash = 0f
+    var nightEvent: NightEvent? = null
+    var eventLeft = 0f
+    var nextEvent = 48f
+    var banner: String? = null
+    var bannerLeft = 0f
+    var sawFog = false
 
     val power: Power
         get() {
@@ -169,6 +181,7 @@ class World(
     val isDawn get() = time >= 420f
 
     init {
+        Field.biome = biome
         player.maxHp = character.hp * meta.hpMul * rite.hpMul
         player.hp = player.maxHp
         weapons += WeaponInst(character.signature, meta.startSigLevel.coerceIn(1, 8))
@@ -179,6 +192,9 @@ class World(
         if (ritualLeft > 0f) m *= 1.12f
         if (isDawn && character.faction == Faction.HOLY) m *= 1.22f
         if (brokenLeft > 0f) m *= 0.86f
+        if (nightEvent == NightEvent.BLOOD_MOON) {
+            m *= if (character.faction == Faction.VAMPIRE) 1.12f else 0.90f
+        }
         return m
     }
     fun cooldownMul() = (1f / power.ability) * (1f - passives.lv(PassiveId.COOLDOWN) * 0.08f).coerceAtLeast(0.45f) * meta.cdMul * rite.cdMul
@@ -212,6 +228,8 @@ class World(
         hitSfxCd = (hitSfxCd - dt).coerceAtLeast(0f)
         shake = (shake - dt * 38f).coerceAtLeast(0f)
         hurtFlash = (hurtFlash - dt * 3.4f).coerceAtLeast(0f)
+        bannerLeft = (bannerLeft - dt).coerceAtLeast(0f)
+        if (bannerLeft <= 0f) banner = null
         if (time >= RUN_SECONDS) {
             end = RunEnd.DAWN
             return
@@ -238,6 +256,7 @@ class World(
 
         tickWeapons(dt)
         tickProjectiles(dt)
+        tickEvents(dt)
         spawn(dt)
         tickEnemies(dt)
         tickBoss(dt)
@@ -512,6 +531,33 @@ class World(
         val it = projectiles.iterator()
         while (it.hasNext()) {
             val pr = it.next()
+            if (pr.hostile) {
+                pr.x += pr.vx * dt
+                pr.y += pr.vy * dt
+                pr.life -= dt
+                if (pr.life <= 0f) {
+                    it.remove()
+                    continue
+                }
+                if (player.invuln <= 0f) {
+                    val rr = pr.radius + player.def.radius
+                    if (dist2(pr.x, pr.y, player.x, player.y) <= rr * rr) {
+                        val taken = pr.damage * (1f - armor()).coerceAtLeast(0.35f)
+                        player.hp -= taken
+                        player.invuln = 0.35f
+                        emit(Cue.HURT)
+                        shake = 7f
+                        hurtFlash = 0.8f
+                        pushFloat(player.x, player.y - 12f, "-${taken.toInt()}", 0xFFFF6677.toInt())
+                        if (player.hp <= 0f) {
+                            player.hp = 0f
+                            end = RunEnd.DEAD
+                        }
+                        it.remove()
+                    }
+                }
+                continue
+            }
             if (!pr.orbit) {
                 if (pr.seek) {
                     val t = nearest(pr.x, pr.y, skip = 0)
@@ -573,7 +619,12 @@ class World(
             time > 120f -> 45
             else -> 32
         }
-        val rate = (1.1f + time / 90f) * rite.spawnMul
+        val eventMul = when (nightEvent) {
+            NightEvent.FOG -> 0.82f
+            NightEvent.BLOOD_MOON -> 1.20f
+            else -> 1f
+        }
+        val rate = (1.1f + time / 90f) * rite.spawnMul * eventMul
         spawnAcc += dt * rate
         while (spawnAcc >= 1f && enemies.size < cap) {
             spawnAcc -= 1f
@@ -597,32 +648,47 @@ class World(
         }
         if (time >= 360f && !spawnedAt360) {
             spawnedAt360 = true
-            spawnBoss()
+            spawnHerald()
         }
     }
 
     private fun rollKind(): EnemyKind {
-        if (rng.nextFloat() < rite.batBias.coerceAtLeast(0f)) return EnemyKind.BAT
+        val moonBats = if (nightEvent == NightEvent.BLOOD_MOON) 0.18f else 0f
+        if (rng.nextFloat() < (rite.batBias + moonBats).coerceAtLeast(0f)) return EnemyKind.BAT
         val t = time
         val r = rng.nextFloat()
+        val chapel = biome == Biome.CHAPEL
         return when {
             t < 40f -> if (r < 0.85f) EnemyKind.THRALL else EnemyKind.BAT
-            t < 120f -> when {
-                r < 0.55f -> EnemyKind.THRALL
-                r < 0.85f -> EnemyKind.BAT
+            t < 90f -> when {
+                r < 0.50f -> EnemyKind.THRALL
+                r < 0.78f -> EnemyKind.BAT
                 else -> EnemyKind.FLAGELLANT
             }
-            t < 240f -> when {
-                r < 0.35f -> EnemyKind.THRALL
-                r < 0.6f -> EnemyKind.BAT
-                r < 0.88f -> EnemyKind.FLAGELLANT
-                else -> EnemyKind.KNIGHT
+            t < 160f -> when {
+                r < 0.28f -> EnemyKind.THRALL
+                r < 0.46f -> if (chapel) EnemyKind.FLAGELLANT else EnemyKind.BAT
+                r < 0.62f -> EnemyKind.FLAGELLANT
+                r < 0.80f -> EnemyKind.ARCHER
+                else -> EnemyKind.VESSEL
+            }
+            t < 280f -> when {
+                r < 0.18f -> EnemyKind.THRALL
+                r < 0.32f -> EnemyKind.BAT
+                r < 0.50f -> EnemyKind.FLAGELLANT
+                r < 0.66f -> EnemyKind.ARCHER
+                r < 0.80f -> EnemyKind.VESSEL
+                r < 0.90f -> EnemyKind.KNIGHT
+                else -> EnemyKind.WARDEN
             }
             else -> when {
-                r < 0.2f -> EnemyKind.THRALL
-                r < 0.4f -> EnemyKind.BAT
-                r < 0.7f -> EnemyKind.FLAGELLANT
-                else -> EnemyKind.KNIGHT
+                r < 0.12f -> EnemyKind.THRALL
+                r < 0.24f -> EnemyKind.BAT
+                r < 0.40f -> EnemyKind.FLAGELLANT
+                r < 0.55f -> EnemyKind.ARCHER
+                r < 0.68f -> EnemyKind.VESSEL
+                r < 0.84f -> EnemyKind.KNIGHT
+                else -> EnemyKind.WARDEN
             }
         }
     }
@@ -648,27 +714,68 @@ class World(
             EnemyKind.BAT -> Enemy(kind, x, y, 12f * scale, 12f * scale, 78f, 12f, 6f, 1)
             EnemyKind.FLAGELLANT -> Enemy(kind, x, y, 36f * scale, 36f * scale, 52f, 16f, 10f, 2)
             EnemyKind.KNIGHT -> Enemy(kind, x, y, 90f * scale, 90f * scale, 40f, 20f, 16f, 5)
+            EnemyKind.ARCHER -> Enemy(kind, x, y, 28f * scale, 28f * scale, 38f, 15f, 6f, 3, shootCd = 1.2f)
+            EnemyKind.VESSEL -> Enemy(kind, x, y, 22f * scale, 22f * scale, 70f, 16f, 8f, 3)
+            EnemyKind.WARDEN -> Enemy(kind, x, y, 140f * scale, 140f * scale, 28f, 22f, 14f, 6)
             EnemyKind.BOSS -> Enemy(kind, x, y, 520f * scale, 520f * scale, 34f, 34f, 22f, 40)
+            EnemyKind.HERALD -> Enemy(kind, x, y, 640f * scale, 640f * scale, 46f, 32f, 18f, 50, shootCd = 1.6f)
         }
     }
 
     private fun tickEnemies(dt: Float) {
         val px = player.x
         val py = player.y
+        val fogSlow = if (nightEvent == NightEvent.FOG) 0.88f else 1f
         for (e in enemies) {
             if (e.hp <= 0f) continue
             val dx = px - e.x
             val dy = py - e.y
             val m = hypot(dx, dy).coerceAtLeast(0.001f)
-            val step = e.speed * rite.enemySpdMul
-            e.x += dx / m * step * dt
-            e.y += dy / m * step * dt
+            val step = e.speed * rite.enemySpdMul * fogSlow
+            when (e.kind) {
+                EnemyKind.ARCHER -> {
+                    when {
+                        m < 150f -> {
+                            e.x -= dx / m * step * dt
+                            e.y -= dy / m * step * dt
+                        }
+                        m > 230f -> {
+                            e.x += dx / m * step * dt
+                            e.y += dy / m * step * dt
+                        }
+                    }
+                    e.shootCd -= dt
+                    if (e.shootCd <= 0f) {
+                        e.shootCd = 2.0f
+                        hostileBolt(e.x, e.y, dx / m, dy / m, 210f, 8f, 0.9f, BoltArt.HEX)
+                    }
+                }
+                EnemyKind.VESSEL -> {
+                    e.x += dx / m * step * 1.05f * dt
+                    e.y += dy / m * step * 1.05f * dt
+                    if (m < 26f) {
+                        vesselBurst(e)
+                    }
+                }
+                EnemyKind.HERALD -> {
+                    e.x += dx / m * step * dt
+                    e.y += dy / m * step * dt
+                }
+                else -> {
+                    e.x += dx / m * step * dt
+                    e.y += dy / m * step * dt
+                }
+            }
             if (e.kind != EnemyKind.BAT) {
                 val ep = Field.pushOut(e.x, e.y, e.radius)
                 e.x = ep.first
                 e.y = ep.second
             }
-            if (dx != 0f) e.facing = if (dx > 0f) 1f else -1f
+            if (e.kind == EnemyKind.WARDEN) {
+                if (kotlin.math.abs(dx) > 48f) e.facing = if (dx > 0f) 1f else -1f
+            } else if (dx != 0f) {
+                e.facing = if (dx > 0f) 1f else -1f
+            }
             e.touchCd = (e.touchCd - dt).coerceAtLeast(0f)
             e.flash = (e.flash - dt).coerceAtLeast(0f)
         }
@@ -724,7 +831,12 @@ class World(
     private fun hurtEnemy(e: Enemy, amount: Float) {
         if (e.hp <= 0f) return
         if (e.invuln) return
-        e.hp -= amount
+        var hit = amount
+        if (e.kind == EnemyKind.WARDEN) {
+            val front = (player.x - e.x) * e.facing > 0f
+            if (front) hit *= 0.48f
+        }
+        e.hp -= hit
         e.flash = 0.09f
         val kx = e.x - player.x
         val ky = e.y - player.y
@@ -733,7 +845,7 @@ class World(
         e.x += kx / km * kick
         e.y += ky / km * kick
         shake = (shake + if (e.role == Role.BOSS) 3.2f else 1.1f).coerceAtMost(11f)
-        pushFloat(e.x, e.y - 10f, amount.toInt().toString(), 0xFFFFE8A0.toInt())
+        pushFloat(e.x, e.y - 10f, hit.toInt().toString(), 0xFFFFE8A0.toInt())
         if (hitSfxCd <= 0f) {
             emit(Cue.HIT)
             hitSfxCd = 0.05f
@@ -751,6 +863,7 @@ class World(
                 dropGem(e.x, e.y, e.xp)
             }
             burst(e.x, e.y, 0xFFD0C8B0.toInt(), 12, 42f)
+            if (e.kind == EnemyKind.VESSEL) vesselBurst(e, alreadyDead = true)
         }
     }
 
@@ -881,6 +994,98 @@ class World(
         if (particles.size > 70) particles.subList(0, particles.size - 70).clear()
     }
 
+    private fun tickEvents(dt: Float) {
+        if (nightEvent != null) {
+            eventLeft -= dt
+            if (eventLeft <= 0f) nightEvent = null
+            return
+        }
+        nextEvent -= dt
+        if (nextEvent > 0f || pendingChest != null) return
+        nextEvent = 52f + rng.nextFloat() * 24f
+        val pick = NightEvent.entries[rng.nextInt(NightEvent.entries.size)]
+        nightEvent = pick
+        eventLeft = 18f + rng.nextFloat() * 6f
+        when (pick) {
+            NightEvent.FOG -> {
+                sawFog = true
+                showBanner("Туман сел на поле.")
+            }
+            NightEvent.BLOOD_MOON -> showBanner("Луна налилась кровью.")
+            NightEvent.PROCESSION -> {
+                showBanner("Идёт крестный ход.")
+                repeat(8) { i ->
+                    val a = -0.4f + i * 0.12f
+                    val (x, y) = edgePoint(a)
+                    enemies += makeEnemy(EnemyKind.FLAGELLANT, x, y)
+                }
+            }
+            NightEvent.SWARM -> {
+                showBanner("Стая с края ночи.")
+                repeat(14) {
+                    val (x, y) = spawnPoint()
+                    enemies += makeEnemy(EnemyKind.BAT, x, y)
+                }
+            }
+        }
+    }
+
+    private fun showBanner(text: String) {
+        banner = text
+        bannerLeft = 2.6f
+    }
+
+    private fun edgePoint(ang: Float): Pair<Float, Float> {
+        val d = 360f
+        return (player.x + cos(ang) * d) to (player.y + sin(ang) * d)
+    }
+
+    private fun hostileBolt(
+        x: Float, y: Float, nx: Float, ny: Float,
+        speed: Float, dmg: Float, life: Float, art: BoltArt,
+    ) {
+        projectiles += Projectile(
+            x, y, nx * speed, ny * speed, life, 6f, dmg, 0, holy = false, art = art,
+            hostile = true,
+        )
+    }
+
+    private fun vesselBurst(e: Enemy, alreadyDead: Boolean = false) {
+        if (!alreadyDead) {
+            if (e.hp <= 0f) return
+            e.hp = 0f
+            kills += 1
+            emit(Cue.KILL)
+            dropGem(e.x, e.y, e.xp)
+        }
+        burst(e.x, e.y, 0xFFCC4428.toInt(), 16, 58f)
+        shake = (shake + 4.5f).coerceAtMost(12f)
+        val r = 52f
+        if (player.invuln <= 0f && dist2(e.x, e.y, player.x, player.y) <= r * r) {
+            val taken = 14f * (1f - armor()).coerceAtLeast(0.35f)
+            player.hp -= taken
+            player.invuln = 0.4f
+            emit(Cue.HURT)
+            hurtFlash = 1f
+            pushFloat(player.x, player.y - 12f, "-${taken.toInt()}", 0xFFFF6677.toInt())
+            if (player.hp <= 0f) {
+                player.hp = 0f
+                end = RunEnd.DEAD
+            }
+        }
+    }
+
+    private fun spawnHerald() {
+        val (x, y) = spawnPoint()
+        val b = makeEnemy(EnemyKind.HERALD, x, y)
+        b.role = Role.BOSS
+        enemies += b
+        boss = b
+        bossPhase = BossPhase.OPEN
+        emit(Cue.BOSS)
+        showBanner("Вестник зари вышел на поле.")
+    }
+
     private fun spawnBoss() {
         val (x, y) = spawnPoint()
         val b = makeEnemy(EnemyKind.BOSS, x, y)
@@ -913,6 +1118,20 @@ class World(
         val b = boss ?: return
         if (b.hp <= 0f) {
             boss = null
+            return
+        }
+        if (b.kind == EnemyKind.HERALD) {
+            b.invuln = false
+            b.shootCd -= dt
+            if (b.shootCd <= 0f) {
+                b.shootCd = if (b.hp < b.maxHp * 0.5f) 1.3f else 2.05f
+                val n = if (b.hp < b.maxHp * 0.5f) 10 else 8
+                repeat(n) { i ->
+                    val a = i * (Math.PI.toFloat() * 2f / n) + time
+                    hostileBolt(b.x, b.y, cos(a), sin(a), 176f, 11f, 1.15f, BoltArt.CROSS)
+                }
+                burst(b.x, b.y, 0xFFE8D48A.toInt(), 8, 40f)
+            }
             return
         }
         when (bossPhase) {

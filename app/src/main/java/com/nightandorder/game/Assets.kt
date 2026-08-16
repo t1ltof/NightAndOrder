@@ -18,6 +18,8 @@ class Assets(context: Context) {
         private set
     var ground: Bitmap? = null
         private set
+    var chapelGround: Bitmap? = null
+        private set
     var menuBg: Bitmap? = null
         private set
 
@@ -59,6 +61,10 @@ class Assets(context: Context) {
         enemies[EnemyKind.FLAGELLANT] = load("enemy_flagellant.png", 80) ?: fallback(0xFF5A4030.toInt(), 80)
         enemies[EnemyKind.KNIGHT] = load("enemy_knight.png", 96) ?: fallback(0xFF2A2A32.toInt(), 96)
         enemies[EnemyKind.BOSS] = load("enemy_boss.png", 160) ?: fallback(0xFF7A2030.toInt(), 160)
+        enemies[EnemyKind.ARCHER] = load("enemy_archer.png", 80) ?: fallback(0xFF4A3A48.toInt(), 80)
+        enemies[EnemyKind.VESSEL] = load("enemy_vessel.png", 88) ?: fallback(0xFF8A4030.toInt(), 88)
+        enemies[EnemyKind.WARDEN] = load("enemy_warden.png", 104) ?: fallback(0xFF3A3A42.toInt(), 104)
+        enemies[EnemyKind.HERALD] = load("enemy_herald.png", 168) ?: fallback(0xFFE0C070.toInt(), 168)
 
         fun loadSheet(name: String, cell: Int): SpriteClip? {
             val src = runCatching {
@@ -93,6 +99,10 @@ class Assets(context: Context) {
         enemyWalk[EnemyKind.FLAGELLANT] = clipOrStill("walk_flagellant.png", enemies.getValue(EnemyKind.FLAGELLANT), 80)
         enemyWalk[EnemyKind.KNIGHT] = clipOrStill("walk_knight.png", enemies.getValue(EnemyKind.KNIGHT), 96)
         enemyWalk[EnemyKind.BOSS] = clipOrStill("walk_boss.png", enemies.getValue(EnemyKind.BOSS), 160)
+        enemyWalk[EnemyKind.ARCHER] = clipOrStill("walk_archer.png", enemies.getValue(EnemyKind.ARCHER), 80)
+        enemyWalk[EnemyKind.VESSEL] = clipOrStill("walk_vessel.png", enemies.getValue(EnemyKind.VESSEL), 88)
+        enemyWalk[EnemyKind.WARDEN] = clipOrStill("walk_warden.png", enemies.getValue(EnemyKind.WARDEN), 104)
+        enemyWalk[EnemyKind.HERALD] = clipOrStill("walk_herald.png", enemies.getValue(EnemyKind.HERALD), 168)
 
         for (art in BoltArt.entries) {
             bolts[art] = load(art.file, 64) ?: fallback(art.fallback, 48)
@@ -102,12 +112,15 @@ class Assets(context: Context) {
         props[PropKind.STONE] = load("prop_stone.png", 72) ?: fallback(0xFF6A6A70.toInt(), 56)
         props[PropKind.TREE] = load("prop_tree.png", 128) ?: fallback(0xFF1A2018.toInt(), 96)
         props[PropKind.TREE_WIDE] = load("prop_tree2.png", 140) ?: fallback(0xFF142018.toInt(), 104)
+        props[PropKind.PILLAR] = load("prop_pillar.png", 120) ?: fallback(0xFF6A6A68.toInt(), 88)
+        props[PropKind.CROSS] = load("prop_cross.png", 100) ?: fallback(0xFF5A6058.toInt(), 72)
+        props[PropKind.SLAB] = load("prop_slab.png", 96) ?: fallback(0xFF5A5A60.toInt(), 64)
 
         tile = load("tile_ground.png", 128)
         menuBg = runCatching {
             am.open("menu_bg.jpg").use { BitmapFactory.decodeStream(it) }
         }.getOrNull()
-        ground = tile?.let { src ->
+        fun sheetOf(src: Bitmap): Bitmap {
             val cell = src.width
             val sheet = Bitmap.createBitmap(cell * 4, cell * 4, Bitmap.Config.RGB_565)
             val cc = Canvas(sheet)
@@ -117,8 +130,10 @@ class Assets(context: Context) {
                     cc.drawBitmap(src, (x * cell).toFloat(), (y * cell).toFloat(), p)
                 }
             }
-            sheet
+            return sheet
         }
+        ground = tile?.let { sheetOf(it) }
+        chapelGround = load("tile_chapel.png", 128)?.let { sheetOf(it) }
     }
 
     private fun fallback(color: Int, size: Int): Bitmap {
