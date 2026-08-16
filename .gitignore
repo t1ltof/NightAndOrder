@@ -10,3 +10,4 @@ keystore/
 *.iml
 .DS_Store
 captures/
+tools/anim_work/

@@ -10,7 +10,11 @@ import android.graphics.Paint
 class Assets(context: Context) {
     val characters = HashMap<CharacterId, Bitmap>()
     val enemies = HashMap<EnemyKind, Bitmap>()
+    val characterWalk = HashMap<CharacterId, SpriteClip>()
+    val enemyWalk = HashMap<EnemyKind, SpriteClip>()
     var tile: Bitmap? = null
+        private set
+    var ground: Bitmap? = null
         private set
 
     init {
@@ -52,7 +56,53 @@ class Assets(context: Context) {
         enemies[EnemyKind.KNIGHT] = load("enemy_knight.png", 96) ?: fallback(0xFF2A2A32.toInt(), 96)
         enemies[EnemyKind.BOSS] = load("enemy_boss.png", 160) ?: fallback(0xFF7A2030.toInt(), 160)
 
+        fun loadSheet(name: String, cell: Int): SpriteClip? {
+            val src = runCatching {
+                am.open(name).use { BitmapFactory.decodeStream(it) }
+            }.getOrNull() ?: return null
+            val h = src.height
+            if (h <= 0) return null
+            val count = (src.width / h).coerceAtLeast(1)
+            val frames = Array(count) { i ->
+                val raw = Bitmap.createBitmap(src, i * h, 0, h, h)
+                if (raw.width == cell && raw.height == cell) raw
+                else Bitmap.createScaledBitmap(raw, cell, cell, true).also {
+                    if (it != raw) raw.recycle()
+                }
+            }
+            return SpriteClip(frames, fps = 8f)
+        }
+
+        fun clipOrStill(sheet: String, still: Bitmap, cell: Int): SpriteClip {
+            return loadSheet(sheet, cell) ?: SpriteClip(arrayOf(still), 1f)
+        }
+
+        characterWalk[CharacterId.MORVAN] = clipOrStill("walk_morvan.png", characters.getValue(CharacterId.MORVAN), 96)
+        characterWalk[CharacterId.LILITH] = clipOrStill("walk_lilith.png", characters.getValue(CharacterId.LILITH), 88)
+        characterWalk[CharacterId.NIX] = clipOrStill("walk_nix.png", characters.getValue(CharacterId.NIX), 96)
+        characterWalk[CharacterId.LUCIA] = clipOrStill("walk_lucia.png", characters.getValue(CharacterId.LUCIA), 92)
+        characterWalk[CharacterId.HALE] = clipOrStill("walk_hale.png", characters.getValue(CharacterId.HALE), 96)
+        characterWalk[CharacterId.SERA] = clipOrStill("walk_sera.png", characters.getValue(CharacterId.SERA), 96)
+
+        enemyWalk[EnemyKind.THRALL] = clipOrStill("walk_thrall.png", enemies.getValue(EnemyKind.THRALL), 72)
+        enemyWalk[EnemyKind.BAT] = clipOrStill("walk_bat.png", enemies.getValue(EnemyKind.BAT), 64)
+        enemyWalk[EnemyKind.FLAGELLANT] = clipOrStill("walk_flagellant.png", enemies.getValue(EnemyKind.FLAGELLANT), 80)
+        enemyWalk[EnemyKind.KNIGHT] = clipOrStill("walk_knight.png", enemies.getValue(EnemyKind.KNIGHT), 96)
+        enemyWalk[EnemyKind.BOSS] = clipOrStill("walk_boss.png", enemies.getValue(EnemyKind.BOSS), 160)
+
         tile = load("tile_ground.png", 96)
+        ground = tile?.let { src ->
+            val cell = src.width
+            val sheet = Bitmap.createBitmap(cell * 4, cell * 4, Bitmap.Config.RGB_565)
+            val cc = Canvas(sheet)
+            val p = Paint().apply { isFilterBitmap = false }
+            for (y in 0 until 4) {
+                for (x in 0 until 4) {
+                    cc.drawBitmap(src, (x * cell).toFloat(), (y * cell).toFloat(), p)
+                }
+            }
+            sheet
+        }
     }
 
     private fun fallback(color: Int, size: Int): Bitmap {

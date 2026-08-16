@@ -30,6 +30,7 @@ class Enemy(
     var damage: Float,
     var xp: Int,
     var touchCd: Float = 0f,
+    var facing: Float = 1f,
 )
 
 class Projectile(
@@ -299,15 +300,18 @@ class World(val character: CharacterDef) {
                 }
             }
         }
-        val orbits = projectiles.filter { it.orbit }
-        val vampireOrbits = orbits.filter { !it.holy }
-        vampireOrbits.forEachIndexed { i, pr ->
-            val n = vampireOrbits.size.coerceAtLeast(1)
-            pr.orbitAngle += pr.orbitSpeed * dt
-            val base = i * (Math.PI.toFloat() * 2f / n)
-            val a = base + pr.orbitAngle
-            pr.x = p.x + cos(a) * pr.orbitRadius
-            pr.y = p.y + sin(a) * pr.orbitRadius
+        var orbitCount = 0
+        for (pr in projectiles) if (pr.orbit && !pr.holy) orbitCount++
+        if (orbitCount > 0) {
+            var i = 0
+            for (pr in projectiles) {
+                if (!pr.orbit || pr.holy) continue
+                pr.orbitAngle += pr.orbitSpeed * dt
+                val a = i * (Math.PI.toFloat() * 2f / orbitCount) + pr.orbitAngle
+                pr.x = p.x + cos(a) * pr.orbitRadius
+                pr.y = p.y + sin(a) * pr.orbitRadius
+                i++
+            }
         }
     }
 
@@ -325,7 +329,7 @@ class World(val character: CharacterDef) {
         for (e in enemies) {
             if (dist2(e.x, e.y, x, y) <= r * r) hurtEnemy(e, dmg)
         }
-        burst(x, y, if (holy) 0xFFE8D48A.toInt() else 0xFF8B1E2D.toInt(), 18, r * 0.6f)
+        burst(x, y, if (holy) 0xFFE8D48A.toInt() else 0xFF8B1E2D.toInt(), 8, r * 0.6f)
     }
 
     private fun tickProjectiles(dt: Float) {
@@ -383,10 +387,10 @@ class World(val character: CharacterDef) {
 
     private fun spawn(dt: Float) {
         val cap = when {
-            time > 360f -> 170
-            time > 240f -> 140
-            time > 120f -> 110
-            else -> 80
+            time > 360f -> 110
+            time > 240f -> 90
+            time > 120f -> 70
+            else -> 50
         }
         val rate = 1.6f + time / 70f
         spawnAcc += dt * rate
@@ -464,10 +468,10 @@ class World(val character: CharacterDef) {
             val m = hypot(dx, dy).coerceAtLeast(0.001f)
             e.x += dx / m * e.speed * dt
             e.y += dy / m * e.speed * dt
+            if (dx != 0f) e.facing = if (dx > 0f) 1f else -1f
             e.touchCd = (e.touchCd - dt).coerceAtLeast(0f)
         }
-        // light separation
-        val n = min(enemies.size, 90)
+        val n = min(enemies.size, 36)
         for (i in 0 until n) {
             val a = enemies[i]
             if (a.hp <= 0f) continue
@@ -606,7 +610,7 @@ class World(val character: CharacterDef) {
             p.life -= dt
             if (p.life <= 0f) it.remove()
         }
-        if (particles.size > 160) particles.subList(0, particles.size - 160).clear()
+        if (particles.size > 70) particles.subList(0, particles.size - 70).clear()
     }
 
     private fun burst(x: Float, y: Float, color: Int, n: Int, speed: Float) {
@@ -618,9 +622,36 @@ class World(val character: CharacterDef) {
     }
 
     private fun nearest(x: Float, y: Float, skip: Int): Enemy? {
-        if (enemies.isEmpty()) return null
-        val sorted = enemies.filter { it.hp > 0f }.sortedBy { dist2(it.x, it.y, x, y) }
-        return sorted.getOrNull(skip.coerceAtMost(sorted.lastIndex))
+        if (skip <= 0) {
+            var best: Enemy? = null
+            var bestD = Float.MAX_VALUE
+            for (e in enemies) {
+                if (e.hp <= 0f) continue
+                val d = dist2(e.x, e.y, x, y)
+                if (d < bestD) {
+                    bestD = d
+                    best = e
+                }
+            }
+            return best
+        }
+        val k = (skip + 1).coerceAtMost(8)
+        val found = arrayOfNulls<Enemy>(k)
+        val dist = FloatArray(k) { Float.MAX_VALUE }
+        for (e in enemies) {
+            if (e.hp <= 0f) continue
+            val d = dist2(e.x, e.y, x, y)
+            if (d >= dist[k - 1]) continue
+            var pos = k - 1
+            while (pos > 0 && d < dist[pos - 1]) {
+                found[pos] = found[pos - 1]
+                dist[pos] = dist[pos - 1]
+                pos--
+            }
+            found[pos] = e
+            dist[pos] = d
+        }
+        return found.getOrNull(skip) ?: found.firstOrNull { it != null }
     }
 
     private fun dist2(ax: Float, ay: Float, bx: Float, by: Float): Float {

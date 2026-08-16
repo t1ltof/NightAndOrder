@@ -7,6 +7,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.LinearGradient
 import android.graphics.Paint
+import android.graphics.PixelFormat
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
@@ -30,6 +31,7 @@ class GameView(
 
     private val assets = Assets(context)
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val spritePaint = Paint().apply { isFilterBitmap = true }
     private val text = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         typeface = Typeface.create(Typeface.SERIF, Typeface.BOLD)
         color = Color.WHITE
@@ -67,9 +69,18 @@ class GameView(
 
     init {
         holder.addCallback(this)
+        holder.setFormat(PixelFormat.OPAQUE)
         isFocusable = true
         isFocusableInTouchMode = true
         keepScreenOn = true
+    }
+
+    private fun resetPaint() {
+        paint.shader = null
+        paint.alpha = 255
+        paint.style = Paint.Style.FILL
+        paint.strokeWidth = 0f
+        paint.color = Color.WHITE
     }
 
     fun onResumeGame() {
@@ -264,6 +275,7 @@ class GameView(
     }
 
     private fun drawAll(c: Canvas) {
+        resetPaint()
         pendingHits.clear()
         when (screen) {
             Screen.TITLE -> drawTitle(c)
@@ -492,12 +504,14 @@ class GameView(
         val textBlock = nameSize + titleSize + bh * 0.08f
         val spriteRoom = (bh - textBlock - 10f).coerceAtLeast(bh * 0.45f)
         val sprite = spriteRoom.coerceAtMost(bw * 0.72f)
-        val bmp = assets.characters[def.id]
+        val clip = assets.characterWalk[def.id]
+        val bmp = clip?.at(titlePulse * 0.7f) ?: assets.characters[def.id]
         if (bmp != null) {
+            val bob = Motion.walkBob(titlePulse + def.id.ordinal, false)
             val dx = x + (bw - sprite) / 2f
-            val dy = y + 6f
+            val dy = y + 6f + bob
             tmp.set(dx, dy, dx + sprite, dy + sprite)
-            c.drawBitmap(bmp, null, tmp, paint)
+            c.drawBitmap(bmp, null, tmp, spritePaint)
         }
         val nameY = y + 6f + sprite + nameSize
         text.textAlign = Paint.Align.CENTER
@@ -531,102 +545,136 @@ class GameView(
         fun sx(x: Float) = w / 2f + (x - camX) * scale
         fun sy(y: Float) = h / 2f + (y - camY) * scale
 
-        val tile = assets.tile
-        if (tile != null) {
-            val tw = tile.width.toFloat()
-            val originX = -((camX * scale) % tw)
-            val originY = -((camY * scale) % tw)
-            var y = originY - tw
-            while (y < h + tw) {
-                var x = originX - tw
-                while (x < w + tw) {
-                    c.drawBitmap(tile, x, y, paint)
+        c.drawColor(0xFF141018.toInt())
+        resetPaint()
+        val ground = assets.ground
+        if (ground != null) {
+            val tw = ground.width.toFloat()
+            val ox = posMod(camX * scale, tw)
+            val oy = posMod(camY * scale, tw)
+            var y = -oy
+            while (y < h) {
+                var x = -ox
+                while (x < w) {
+                    c.drawBitmap(ground, x, y, spritePaint)
                     x += tw
                 }
                 y += tw
             }
-        } else {
-            c.drawColor(0xFF141018.toInt())
         }
 
+        val margin = 80f
         for (g in wld.pickups) {
+            val gx = sx(g.x)
+            val gy = sy(g.y)
+            if (gx < -margin || gy < -margin || gx > w + margin || gy > h + margin) continue
+            val pulse = Motion.gemPulse(wld.time * 2f + g.x * 0.01f)
             paint.color = 0xFF7EC8FF.toInt()
-            c.drawCircle(sx(g.x), sy(g.y), 5f * scale, paint)
+            c.drawCircle(gx, gy, 5f * scale * pulse, paint)
+            paint.color = 0xAAE8F8FF.toInt()
+            c.drawCircle(gx, gy, 2.2f * scale * pulse, paint)
         }
         for (e in wld.enemies) {
-            val bmp = assets.enemies[e.kind]
+            val ex = sx(e.x)
+            val ey = sy(e.y)
+            if (ex < -margin || ey < -margin || ex > w + margin || ey > h + margin) continue
+            val clip = assets.enemyWalk[e.kind]
+            val bmp = clip?.at(wld.time) ?: assets.enemies[e.kind]
+            val bob = Motion.walkBob(wld.time + e.x * 0.05f, true)
+            val squash = Motion.walkSquash(wld.time + e.x * 0.05f, true)
             val size = e.radius * 2.4f * scale
             if (bmp != null) {
-                tmp.set(sx(e.x) - size / 2f, sy(e.y) - size / 2f, sx(e.x) + size / 2f, sy(e.y) + size / 2f)
-                c.drawBitmap(bmp, null, tmp, paint)
+                c.save()
+                if (e.facing < 0f) c.scale(-1f, 1f, ex, ey)
+                val hw = size / 2f
+                val hh = size / 2f * squash
+                tmp.set(ex - hw, ey - hh + bob, ex + hw, ey + hh + bob)
+                c.drawBitmap(bmp, null, tmp, spritePaint)
+                c.restore()
             } else {
                 paint.color = 0xFF6A5040.toInt()
-                c.drawCircle(sx(e.x), sy(e.y), e.radius * scale, paint)
+                c.drawCircle(ex, ey + bob, e.radius * scale, paint)
             }
             if (e.hp < e.maxHp) {
                 val bw = e.radius * 2.2f * scale
-                paint.color = 0x88000000.toInt()
-                c.drawRect(sx(e.x) - bw / 2f, sy(e.y) - e.radius * scale - 8f, sx(e.x) + bw / 2f, sy(e.y) - e.radius * scale - 4f, paint)
+                paint.color = 0xFF000000.toInt()
+                c.drawRect(ex - bw / 2f, ey - e.radius * scale - 8f, ex + bw / 2f, ey - e.radius * scale - 4f, paint)
                 paint.color = 0xFFCC3344.toInt()
-                c.drawRect(sx(e.x) - bw / 2f, sy(e.y) - e.radius * scale - 8f, sx(e.x) - bw / 2f + bw * (e.hp / e.maxHp), sy(e.y) - e.radius * scale - 4f, paint)
+                c.drawRect(ex - bw / 2f, ey - e.radius * scale - 8f, ex - bw / 2f + bw * (e.hp / e.maxHp), ey - e.radius * scale - 4f, paint)
             }
         }
         for (pr in wld.projectiles) {
+            val px = sx(pr.x)
+            val py = sy(pr.y)
+            if (px < -margin || py < -margin || px > w + margin || py > h + margin) continue
             paint.color = when {
                 pr.holy && pr.explode -> 0xFFFFF0B0.toInt()
                 pr.holy -> 0xFFE8D48A.toInt()
                 pr.seek -> 0xFFC04088.toInt()
                 else -> 0xFFB02030.toInt()
             }
-            c.drawCircle(sx(pr.x), sy(pr.y), pr.radius * scale, paint)
+            c.save()
+            c.rotate(Math.toDegrees(Motion.spin(wld.time + pr.x * 0.02f, 14f).toDouble()).toFloat(), px, py)
+            val rr = pr.radius * scale
+            if (pr.orbit || pr.seek) {
+                c.drawCircle(px, py, rr, paint)
+                paint.color = 0x66FFFFFF
+                c.drawCircle(px - rr * 0.3f, py - rr * 0.3f, rr * 0.35f, paint)
+            } else {
+                tmp.set(px - rr, py - rr * 0.55f, px + rr, py + rr * 0.55f)
+                c.drawRoundRect(tmp, rr * 0.4f, rr * 0.4f, paint)
+            }
+            c.restore()
         }
         for (p in wld.particles) {
-            paint.color = p.color
-            paint.alpha = (255 * (p.life / p.maxLife)).toInt().coerceIn(0, 255)
-            c.drawCircle(sx(p.x), sy(p.y), p.size * scale, paint)
-            paint.alpha = 255
+            val px = sx(p.x)
+            val py = sy(p.y)
+            if (px < -margin || py < -margin || px > w + margin || py > h + margin) continue
+            val a = (255 * (p.life / p.maxLife)).toInt().coerceIn(0, 255)
+            paint.color = (a shl 24) or (p.color and 0x00FFFFFF)
+            c.drawCircle(px, py, p.size * scale, paint)
         }
+        resetPaint()
 
         val p = wld.player
         val flash = p.invuln > 0f && ((p.invuln * 20).toInt() % 2 == 0)
         if (!flash) {
-            val bmp = assets.characters[p.def.id]
+            val moving = hypot(p.vx, p.vy) > 12f
+            val clip = assets.characterWalk[p.def.id]
+            val animT = if (moving) wld.time else wld.time * 0.4f
+            val bmp = clip?.at(animT) ?: assets.characters[p.def.id]
             val size = p.def.radius * 3.1f * scale
             if (bmp != null) {
+                val px = sx(p.x)
+                val py = sy(p.y)
+                val bob = Motion.walkBob(wld.time, moving)
+                val squash = Motion.walkSquash(wld.time, moving)
                 c.save()
                 if (p.facing < 0f) {
-                    c.scale(-1f, 1f, sx(p.x), sy(p.y))
+                    c.scale(-1f, 1f, px, py)
                 }
-                tmp.set(sx(p.x) - size / 2f, sy(p.y) - size / 2f, sx(p.x) + size / 2f, sy(p.y) + size / 2f)
-                c.drawBitmap(bmp, null, tmp, paint)
+                val hw = size / 2f
+                val hh = size / 2f * squash
+                tmp.set(px - hw, py - hh + bob, px + hw, py + hh + bob)
+                c.drawBitmap(bmp, null, tmp, spritePaint)
                 c.restore()
             }
         }
 
-        drawVignette(c, wld)
         drawHud(c, wld)
         if (stickId != -1) {
-            paint.color = 0x33FFFFFF
+            paint.color = 0x55FFFFFF.toInt()
             c.drawCircle(stickCx, stickCy, 90f, paint)
-            paint.color = 0x66FFFFFF
+            paint.color = 0x99FFFFFF.toInt()
             c.drawCircle(stickCx + stickX * 90f, stickCy + stickY * 90f, 34f, paint)
+            resetPaint()
         }
     }
 
-    private fun drawVignette(c: Canvas, wld: World) {
-        val rite = wld.power.rite
-        val w = c.width.toFloat()
-        val h = c.height.toFloat()
-        val color = if (wld.character.faction == Faction.VAMPIRE) {
-            Color.argb((20 + rite * 90).toInt(), 90, 10, 20)
-        } else {
-            Color.argb((12 + rite * 50).toInt(), 220, 190, 110)
-        }
-        paint.shader = LinearGradient(0f, 0f, 0f, h * 0.22f, color, Color.TRANSPARENT, Shader.TileMode.CLAMP)
-        c.drawRect(0f, 0f, w, h * 0.22f, paint)
-        paint.shader = LinearGradient(0f, h, 0f, h * 0.78f, color, Color.TRANSPARENT, Shader.TileMode.CLAMP)
-        c.drawRect(0f, h * 0.78f, w, h, paint)
-        paint.shader = null
+    private fun posMod(value: Float, mod: Float): Float {
+        if (mod <= 0f) return 0f
+        val r = value % mod
+        return if (r < 0f) r + mod else r
     }
 
     private fun drawHud(c: Canvas, wld: World) {
